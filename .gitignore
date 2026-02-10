@@ -1,0 +1,41 @@
+# --- Python & Environments ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# --- Data & Outputs (CRITICAL) ---
+# Ignore generated csvs/plots
+outputs/
+# Ignore individual logs inside folders (keep the folder structure if you want)
+logs/
+*.log
+
+# --- Jupyter Notebooks ---
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# --- Editor Settings ---
+.vscode/
+.idea/
+*.swp
+
+.spyproject/
+.spyderproject
+*.spydata
+*.log
+
+# --- Secrets (CRITICAL) ---
+keys.yaml
+
+# --- Mac OS junk ---
+.DS_Store
+
+# --- Windows System Files ---
+Thumbs.db
+ehthumbs.db
+Desktop.ini
