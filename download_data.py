@@ -184,7 +184,12 @@ def process_flows(config: PipelineConfig, flow_type: str = "commercial", dayahea
 def balance_flows_symmetry(data_dict: Dict[str, pd.DataFrame], config: PipelineConfig, flow_type: str = "commercial", dayahead: bool = False) -> Dict[str, pd.DataFrame]:
     """Ensures flow symmetry (A->B == B->A) across the network."""
     print(f"[Balance] Ensuring symmetry for {flow_type}...")
-    folder = f"comm_flow_{'dayahead' if dayahead else 'total' if flow_type == 'commercial' else 'physical_flow_data'}_bidding_zones"
+    
+    if flow_type == "physical":
+        folder = "physical_flow_data_bidding_zones"
+    else:
+        folder = f"comm_flow_{'dayahead' if dayahead else 'total'}_bidding_zones"
+        
     data_dir = config.get_output_path(folder)
     
     for bz in data_dict.keys():
