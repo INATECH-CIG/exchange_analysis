@@ -1,10 +1,6 @@
 # Exchange Analysis
 
-This project is a robust data pipeline for analyzing European electricity cross-border flows. It downloads raw data from the ENTSO-E Transparency Platform, processes it to fix data gaps, and performs advanced network analysis including:
-
-* **Flow Decomposition:** Tracking the origin of imports based on neighbor generation mixes.
-* **Flow Tracing:** Using matrix inversion (linear algebra) to trace electrons through the grid (Direct & Aggregated Coupling).
-* **Pooling Analysis:** Simulating a hypothetical "European Copper Plate" mix.
+This project analyses data available through the ENTSO-E API using multiple methods (e.g. flow tracing, pooling), in order to determine the import sources and export sinks in the European electricity market on a per bidding zone and per type basis, for each bidding zone in the network.
 
 ## 🛠️ Prerequisites
 
@@ -114,3 +110,4 @@ Results are saved as time series in the `outputs/` directory, organized by year:
 * **`annual_totals_per_method/`**: Final aggregated TWh CSVs for visualization.
 
 ---
+
