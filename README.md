@@ -2,12 +2,12 @@
 
 This project analyses data available through the ENTSO-E API using multiple methods (e.g. flow tracing, pooling), in order to determine the import sources and export sinks in the European electricity market on a per bidding zone and per type basis, for each bidding zone in the network. Import/export results for the following methods can be calculated:
 
-1. Commercial Flows Total (CFT): Take incoming/outgoing line (for import/export) as the exchange value from/to a neighbouring bidding zone.
-2. Netted Commercial Flows Total (Netted CFT): Net over incoming and outgoing line as the exchange value from/to a neighbouring bidding zone.
-3. Pooled Net CFT: A bidding zone's net import is proportionally supplied by all net exporters in the network at each timepoint, a "copper plate" grid model without transmission constraints. Vice versa for net export.
-4. Pooled Net Phys.: Similar to Pooled Net CFT, however uses physical flow net position values instead of CFT values.
-5. Direct Coupling (DC) Flow Tracing: Takes into account the potential for flows to continue beyond immediate neighbours and for transit flows. Each zone's generation, load and exchanges with neighbours are elements of the network.
-6. Aggregated Coupling (AC) Flow Tracing: Similar to Direct Coupling, however the net position of a zone is now its contribution to the network instead of both its generation and load.
+1. **Commercial Flows Total (CFT):** Take incoming/outgoing line (for import/export) as the exchange value from/to a neighbouring bidding zone.
+2. **Netted Commercial Flows Total (Netted CFT):** Net over incoming and outgoing line as the exchange value from/to a neighbouring bidding zone.
+3. **Pooled Net CFT:** A bidding zone's net import is proportionally supplied by all net exporters in the network at each timepoint, a "copper plate" grid model without transmission constraints. Vice versa for net export.
+4. **Pooled Net Phys.:** Similar to Pooled Net CFT, however uses physical flow net position values instead of CFT values.
+5. **Direct Coupling (DC) Flow Tracing:** Takes into account the potential for flows to continue beyond immediate neighbours and for transit flows. Each zone's generation, load and exchanges with neighbours are elements of the network.
+6. **Aggregated Coupling (AC) Flow Tracing:** Similar to Direct Coupling, however the net position of a zone is now its contribution to the network instead of both its generation and load.
 
 ## 🛠️ Prerequisites
 
