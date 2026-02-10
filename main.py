@@ -27,7 +27,7 @@ def main():
     
     # 1. Execution Flags (True = Run this step)
     my_run_flags = {
-        "download": False,
+        "download": True,
         "process": True,
         "analysis": True,
     }

@@ -31,7 +31,7 @@ def download_generation_demand(client: EntsoePandasClient, config: PipelineConfi
 
         if bz == "GB":
             try:
-                print(f"   -> Using BMRS API for GB...")
+                print("   -> Using BMRS API for GB...")
                 gen_df = download_GB_per_type_data(config.start, config.end)
                 load_df = download_GB_demand_data(config.start, config.end)
             except Exception as e:

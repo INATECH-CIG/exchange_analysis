@@ -83,7 +83,7 @@ entsoe-key: "YOUR-UUID-API-KEY-HERE"
 Open `main.py` to adjust the **Control Panel** section:
 
 * **Run Flags:** Set steps to `True` or `False` (e.g., set `download: False` if you already have the data).
-* **Period:** Set your start and end dates (e.g., `"2024-01-01 00:00"`).
+* **Period:** Set your start and end dates (e.g., `"2024-01-01 00:00"`, `"2024-12-31 23:59"`), output directories are organised by years, so the best practice is to use a full year as start and end dates.
 * **Subsets:** Uncomment `selected_bzs`/`target_zones` if you only want to download data for specific bidding zones (e.g., `["DE_LU", "FR"]`), and `selected_data_types`/`data_types` to download specific types of data (generation and load, commercial flow total etc.).
 
 
@@ -105,7 +105,7 @@ Real-time logs will appear in your terminal. Detailed logs are saved to:
 
 ## 📂 Outputs
 
-Import results are saved on a per bidding zone, per type, and "per type per bidding zone" basis as time series CSVs in the `outputs/` directory, organized by year. Only export totals are saved, as export time series would be essentially a duplicate of import time series results. The following folders can be generated:
+Import results are saved on a per bidding zone, per type, and "per bidding zone per type" basis as CSV time series in the `outputs/` directory, organized by year. Exports are only saved as totals, as export time series would be essentially a duplicate of import time series results. The following folders can be generated:
 
 * **`generation_demand_data.../`**: Hourly generation and load used for determining per type mixes of import/export, and used in direct flow tracing.
 * **`comm_flow_total.../`**: Hourly commercial flow total exchanges, determines import results using in-coming line values or by netting over both directions, used as input to pooling approach.
