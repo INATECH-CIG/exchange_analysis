@@ -161,7 +161,8 @@ def process_flows(config: PipelineConfig, flow_type: str = "commercial", dayahea
         df = df.resample("1h").mean()
         
         # --- GAP FILLING (Flows) ---
-        df = fill_gaps_wrapper(df, gaps_dir, f"{bz}_flows")
+        df = fill_gaps_wrapper(df, gaps_dir, f"{bz}_flows", config=config, bz=bz, 
+                               flow_type=flow_type, dayahead=dayahead)
         
         # Calculate Net Exports per neighbor
         net_df = pd.DataFrame(index=df.index)
@@ -181,35 +182,57 @@ def process_flows(config: PipelineConfig, flow_type: str = "commercial", dayahea
 
     return flow_dict
 
-def balance_flows_symmetry(data_dict: Dict[str, pd.DataFrame], config: PipelineConfig, flow_type: str = "commercial", dayahead: bool = False) -> Dict[str, pd.DataFrame]:
-    """Ensures flow symmetry (A->B == B->A) across the network."""
+def balance_flows_symmetry(data_dict, config, flow_type="commercial", dayahead=False):
+    """
+    Enforces flow symmetry (A->B == B->A).
+    Priority: If a zone has a processed '_zeros.csv' file, its data is treated as ground truth.
+    """
     print(f"[Balance] Ensuring symmetry for {flow_type}...")
     
-    if flow_type == "physical":
-        folder = "physical_flow_data_bidding_zones"
-    else:
-        folder = f"comm_flow_{'dayahead' if dayahead else 'total'}_bidding_zones"
-        
-    data_dir = config.get_output_path(folder)
-    
-    for bz in data_dict.keys():
+    # Setup paths
+    folder = "physical_flow_data_bidding_zones" if flow_type == "physical" else f"comm_flow_{'dayahead' if dayahead else 'total'}_bidding_zones"
+    suffix = f"_{folder}.csv"
+    gaps_dir = config.get_gaps_path(folder)
+
+    for bz in data_dict:
+        # Check if this zone is a "Trusted Source" (has processed gaps file)
+        bz_is_trusted = (gaps_dir / f"{bz}_zeros.csv").exists()
+
         for n in config.neighbours_map[bz]:
             if n not in data_dict: continue
-            col_out, col_in = f"{bz}_{n}", f"{n}_{bz}"
-            
-            if col_out in data_dict[bz].columns and col_out in data_dict[n].columns:
-                # Naive balancing: Overwrite with Neighbor's data if diff exists
-                if (data_dict[bz][col_out] - data_dict[n][col_out]).sum() != 0:
-                    data_dict[n][col_out] = data_dict[bz][col_out]
-                    data_dict[n][col_in] = data_dict[bz][col_in]
-                    if f"{n}_{bz}_net_export" in data_dict[n]:
-                         data_dict[n][f"{n}_{bz}_net_export"] = data_dict[n][col_out] - data_dict[n][col_in]
 
-    # Recalculate Total Net Export and Save
-    suffix = f"_net_export_commercial_flows_{'dayahead' if dayahead else 'total'}_bidding_zones.csv" if flow_type == "commercial" else "_physical_flow_data_bidding_zones.csv"
+            # Define columns
+            bz_export, bz_import = f"{bz}_{n}", f"{n}_{bz}"
+            n_export, n_import = f"{n}_{bz}", f"{bz}_{n}"
+
+            if bz_export in data_dict[bz] and n_import in data_dict[n]:
+                # Check mismatch
+                if (data_dict[bz][bz_export] - data_dict[n][n_import]).abs().sum() > 1e-3:
+                    
+                    if bz_is_trusted:
+                        # Case A: Trust BZ. Overwrite Neighbor.
+                        data_dict[n][n_import] = data_dict[bz][bz_export].values
+                        data_dict[n][n_export] = data_dict[bz][bz_import].values
+                        
+                        # Fix Neighbor's Net Export
+                        if f"{n}_{bz}_net_export" in data_dict[n]:
+                            data_dict[n][f"{n}_{bz}_net_export"] = data_dict[n][n_export] - data_dict[n][n_import]
+                    else:
+                        # Case B: Trust Neighbor. Overwrite BZ.
+                        data_dict[bz][bz_export] = data_dict[n][n_import].values
+                        data_dict[bz][bz_import] = data_dict[n][n_export].values
+
+                        # Fix BZ's Net Export
+                        if f"{bz}_{n}_net_export" in data_dict[bz]:
+                            data_dict[bz][f"{bz}_{n}_net_export"] = data_dict[bz][bz_export] - data_dict[bz][bz_import]
+
+    # Recalculate Total Net Exports and Save
+    out_dir = config.get_output_path(folder)
     for bz, df in data_dict.items():
-        df["Net Export"] = df[[c for c in df.columns if "net_export" in c and c != "Net Export"]].sum(axis=1)
-        df.to_csv(data_dir / f"{bz}{suffix}")
+        net_cols = [c for c in df.columns if "net_export" in c and c != "Net Export"]
+        if net_cols: df["Net Export"] = df[net_cols].sum(axis=1)
+        df.to_csv(out_dir / f"{bz}{suffix}")
+
     return data_dict
 
 # ==========================================

@@ -60,6 +60,14 @@ def perform_decomposition_analysis(config: PipelineConfig, gen_dfs=None, comm_df
     """
     print("\n=== STARTING COMMERCIAL FLOW DECOMPOSITION ===")
     gen_dfs, comm_dfs, _ = _load_if_missing(config, gen_dfs, comm_dfs=comm_dfs)
+    
+    # Setup Output Directories
+    agg_map = config.gen_types_df.groupby(['converted'])['entsoe'].apply(list).to_dict()
+    base_out = config.output_dir / "comm_flow_total_bidding_zones" / str(config.year) / "results"
+    
+    dirs = {t: base_out / t for t in ["per_type_per_bidding_zone", "per_type", "per_agg_type", "per_bidding_zone"]}
+    for k in list(dirs.keys()): dirs[f"netted_{k}"] = base_out / f"netted_{k}"
+    for d in dirs.values(): d.mkdir(parents=True, exist_ok=True)
 
     # A. Prepare Netted Imports
     print("[Decomposition] Preparing Netted Import columns...")
@@ -69,6 +77,38 @@ def perform_decomposition_analysis(config: PipelineConfig, gen_dfs=None, comm_df
             target_col = col.replace("_net_export", "_netted_import")
             if target_col not in df.columns:
                 df[target_col] = df[col].clip(upper=0).abs()
+                
+    print("[Decomposition] Saving raw flow totals (per_bidding_zone)...")
+    
+    for bz in comm_dfs:
+        # 1. Setup Containers
+        raw_total_imports = pd.DataFrame(index=config.time_index)
+        raw_netted_imports = pd.DataFrame(index=config.time_index)
+        
+        # 2. Extract Columns
+        # We look for columns like "FR_DE_LU" (Import to DE from FR) inside DE's dataframe
+        for neighbor in config.zones:
+            col_flow = f"{neighbor}_{bz}"
+            col_netted = f"{bz}_{neighbor}_netted_import" # Note: Netted naming convention varies in your script, check this!
+            
+            # Save Raw Total Flow
+            if col_flow in comm_dfs[bz].columns:
+                raw_total_imports[neighbor] = comm_dfs[bz][col_flow]
+                
+            # Save Raw Netted Flow
+            if col_netted in comm_dfs[bz].columns:
+                raw_netted_imports[neighbor] = comm_dfs[bz][col_netted]
+
+        # 3. Save Immediately
+        if not raw_total_imports.empty:
+            path_total = dirs["per_bidding_zone"] / f"{bz}_import_comm_flow_total_per_bidding_zone.csv"
+            raw_total_imports.to_csv(path_total)
+            
+        if not raw_netted_imports.empty:
+            path_netted = dirs["netted_per_bidding_zone"] / f"{bz}_import_comm_flow_total_netted_per_bidding_zone.csv"
+            raw_netted_imports.to_csv(path_netted)
+            
+    print("[Decomposition] Raw totals saved. Proceeding to fuel type analysis...")
 
     # B. Calculate Generation Fractions
     print("[Decomposition] Calculating generation mix fractions...")
@@ -81,15 +121,7 @@ def perform_decomposition_analysis(config: PipelineConfig, gen_dfs=None, comm_df
             fracs["Hydro Pumped Storage"] = df["Storage Discharge"] / total
         gen_fractions[bz] = fracs
 
-    # C. Setup Output Directories
-    agg_map = config.gen_types_df.groupby(['converted'])['entsoe'].apply(list).to_dict()
-    base_out = config.output_dir / "comm_flow_total_bidding_zones" / str(config.year) / "results"
-    
-    dirs = {t: base_out / t for t in ["per_type_per_bidding_zone", "per_type", "per_agg_type", "per_bidding_zone"]}
-    for k in list(dirs.keys()): dirs[f"netted_{k}"] = base_out / f"netted_{k}"
-    for d in dirs.values(): d.mkdir(parents=True, exist_ok=True)
-
-    # D. Perform Decomposition
+    # C. Perform Decomposition
     valid_zones = [z for z in config.zones if z in comm_dfs]
     print(f"[Decomposition] Processing {len(valid_zones)} zones...")
     
@@ -131,7 +163,7 @@ def perform_decomposition_analysis(config: PipelineConfig, gen_dfs=None, comm_df
             total_full.to_csv(dirs["per_type_per_bidding_zone"] / f"{bz}_import_comm_flow_total_per_type_per_bidding_zone.csv")
             netted_full.to_csv(dirs["netted_per_type_per_bidding_zone"] / f"{bz}_import_comm_flow_total_netted_per_type_per_bidding_zone.csv")
             
-            # E. Aggregate by Fuel Type (e.g., all Wind entering DE)
+            # D. Aggregate by Fuel Type (e.g., all Wind entering DE)
             per_type = pd.DataFrame(index=config.time_index)
             per_type_net = pd.DataFrame(index=config.time_index)
             
@@ -145,7 +177,7 @@ def perform_decomposition_analysis(config: PipelineConfig, gen_dfs=None, comm_df
             per_type.to_csv(dirs["per_type"] / f"{bz}_import_comm_flow_total_per_type.csv")
             per_type_net.to_csv(dirs["netted_per_type"] / f"{bz}_import_comm_flow_total_netted_per_type.csv")
             
-            # F. Aggregate by Category (Renewable/Fossil)
+            # E. Aggregate by Category (Renewable/Fossil)
             per_agg = pd.DataFrame(index=config.time_index)
             per_agg_net = pd.DataFrame(index=config.time_index)
             for cat, techs in agg_map.items():
@@ -156,18 +188,6 @@ def perform_decomposition_analysis(config: PipelineConfig, gen_dfs=None, comm_df
             
             per_agg.to_csv(dirs["per_agg_type"] / f"{bz}_import_comm_flow_total_per_agg_type.csv")
             per_agg_net.to_csv(dirs["netted_per_agg_type"] / f"{bz}_import_comm_flow_total_netted_per_agg_type.csv")
-            
-            # G. Aggregate by Origin Country
-            per_bz = pd.DataFrame(index=config.time_index)
-            per_bz_net = pd.DataFrame(index=config.time_index)
-            for neighbor in config.zones:
-                cols = [c for c in total_full.columns if c.startswith(f"{neighbor}_")]
-                if cols:
-                    per_bz[neighbor] = total_full[cols].sum(axis=1)
-                    per_bz_net[neighbor] = netted_full[cols].sum(axis=1)
-            
-            per_bz.to_csv(dirs["per_bidding_zone"] / f"{bz}_import_comm_flow_total_per_bidding_zone.csv")
-            per_bz_net.to_csv(dirs["netted_per_bidding_zone"] / f"{bz}_import_comm_flow_total_netted_per_bidding_zone.csv")
             
     print("[Decomposition] Analysis Complete.")
 

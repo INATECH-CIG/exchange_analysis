@@ -173,7 +173,6 @@ def find_gaps_series(
 
     gaps = pd.DataFrame({"start": series[gap_starts].index, "end": series[gap_ends].index})
     
-    # --- FIX 1: ADDED result_type="reduce" ---
     gaps["duration"] = gaps.apply(
         lambda row: is_nan[row["start"] : row["end"]].sum(), 
         axis=1,
@@ -248,36 +247,115 @@ def find_gaps(
     )
     return df, output_dict
 
+def patch_gaps_with_dayahead(flow_df, gap_dict, bz, neighbour, config, min_gap_length=pd.Timedelta(weeks=1)):
+    """
+    Patches gaps in commercial flow data using Day-Ahead (Scheduled) data 
+    if the gap duration exceeds 'min_gap_length'.
+    """
+    # 1. Check if we have any long gaps to patch
+    long_gaps = []
+    
+    # Check Outgoing Gaps (BZ -> Neighbor)
+    col_out = f"{bz}_{neighbour}"
+    if col_out in gap_dict:
+        for _, row in gap_dict[col_out].iterrows():
+            duration = row["end"] - row["start"]
+            if duration > min_gap_length:
+                long_gaps.append((col_out, row["start"], row["end"]))
+
+    # Check Incoming Gaps (Neighbor -> BZ)
+    col_in = f"{neighbour}_{bz}"
+    if col_in in gap_dict:
+        for _, row in gap_dict[col_in].iterrows():
+            duration = row["end"] - row["start"]
+            if duration > min_gap_length:
+                long_gaps.append((col_in, row["start"], row["end"]))
+
+    if not long_gaps:
+        return flow_df  # No long gaps, nothing to do
+
+    # 2. Load Day-Ahead Data (Only if needed)
+    dayahead_path = config.get_output_path("comm_flow_dayahead_bidding_zones") / f"{bz}_commercial_flows_dayahead_bidding_zones.csv"
+    
+    if not dayahead_path.exists():
+        print(f"   [Warning] Long gap detected for {bz}<->{neighbour}, but no Day-Ahead file found to patch it.")
+        return flow_df
+
+    try:
+        da_df = pd.read_csv(dayahead_path, index_col=0)
+        da_df.index = pd.to_datetime(da_df.index, utc=True)
+    except Exception as e:
+        print(f"   [Error] Failed to load DA file for {bz}: {e}")
+        return flow_df
+
+    # 3. Apply Patches
+    patched_count = 0
+    for col, start, end in long_gaps:
+        if col in da_df.columns:
+            # logging the replacement
+            print(f"   [Patching] Replacing {col} with Day-Ahead values from {start} to {end}")
+            
+            # Ensure alignment
+            replacement = da_df.loc[start:end, col]
+            
+            # If DA data is missing too, we can't patch
+            if replacement.empty or replacement.isna().all():
+                 print("      [Warning] Day-Ahead data also missing/empty for this period.")
+                 continue
+                 
+            flow_df.loc[start:end, col] = replacement
+            patched_count += 1
+        else:
+            print(f"      [Warning] Day-Ahead file missing column {col}.")
+
+    if patched_count > 0:
+        print(f"   -> Successfully patched {patched_count} long gaps using Day-Ahead data.")
+        
+    return flow_df
+
 # ==========================================
 # DATA PROCESSING WRAPPERS
 # ==========================================
 
-def fill_gaps_wrapper(df: pd.DataFrame, gaps_dir, prefix):
+def fill_gaps_wrapper(df: pd.DataFrame, gaps_dir, prefix, config=None, bz=None, 
+                      flow_type=None, dayahead=False):
     """
-    Wrapper for the sophisticated find_gaps engine.
-    - Fills gaps in the DataFrame.
-    - Saves individual CSV reports for each column that had gaps.
+    Wrapper for find_gaps.
+    1. Finds gaps.
+    2. Patches large commercial flow gaps with Day-Ahead data (if config/bz provided).
+    3. Statistically fills remaining gaps.
+    4. Saves reports.
     """
     if df.empty: return df
     
-    # 1. Run Gap Finding & Filling
-    df_filled, gaps_dict = find_gaps(
+    # 1. Find initial gaps (do not fill yet)
+    _, gaps_dict = find_gaps(df, check_negatives=False, fill_gaps=False)
+
+    # 2. Patch Large Gaps with Day-Ahead (Commercial Flows Only)            
+    if config and bz and (flow_type == "commercial") and (not dayahead):
+        
+        if bz in config.neighbours_map:
+            potential_neighbors = config.neighbours_map[bz]
+            # Only process if the column 'BZ_Neighbor' actually exists in this DF
+            actual_neighbors = [n for n in potential_neighbors if f"{bz}_{n}" in df.columns]
+            
+            for neighbour in actual_neighbors:
+                df = patch_gaps_with_dayahead(df, gaps_dict, bz, neighbour, config)
+
+    # 3. Statistically Fill Remaining Gaps
+    df_filled, final_gaps = find_gaps(
         df, 
         check_negatives=False, 
         fill_gaps=True, 
         gap_filling_rules=default_rules
     )
     
-    # 2. Iterate and Save Reports for each Column
-    if gaps_dict:
-        for key in gaps_dict.keys():
-            gap_df = gaps_dict[key]
-            # Only save if gaps were actually found
+    # 4. Save Reports for columns that were filled
+    if gaps_dir:
+        for key, gap_df in gaps_dict.items():
             if not gap_df.empty:
-                # Sanitize key name for filename (e.g., "Wind Onshore" -> "Wind_Onshore")
                 safe_key = str(key).replace("/", "_").replace(" ", "_")
-                filename = f"{prefix}_{safe_key}_gaps.csv"
-                gap_df.to_csv(gaps_dir / filename)
+                gap_df.to_csv(gaps_dir / f"{prefix}_{safe_key}_gaps.csv")
     
     return df_filled
 
