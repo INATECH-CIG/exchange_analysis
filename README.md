@@ -141,7 +141,7 @@ Import results are saved on a per bidding zone, per type, and "per bidding zone 
 **Tiernan Buckley**
 * **Project:** Master's Thesis in Sustainable Systems Engineering at the University of Freiburg
 * **Contact:** tbuckle@tcd.ie
-* **GitHub:** [@YourGitHubUsername](https://github.com/tiernan-buckley)
+* **GitHub:** [@tiernan-buckley](https://github.com/tiernan-buckley)
 
 ## 📄 License
 
