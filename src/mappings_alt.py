@@ -1,4 +1,4 @@
-# neighbouring bidding zones that have cross_border flows
+# neighbouring bidding zones that have cross_border flows, modified version from entsoe-py mappings.py
 NEIGHBOURS = {
     'BE': ['NL', 'DE_AT_LU', 'FR', 'GB', 'DE_LU'],
     'NL': ['BE', 'DE_AT_LU', 'DE_LU', 'GB', 'NO_2', 'DK_1'],
