@@ -1,8 +1,19 @@
+"""
+Project: European Electricity Exchange Analysis
+Author: Tiernan Buckley
+Year: 2026
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+Source: https://github.com/INATECH-CIG/exchange_analysis
+
+Description:
+Centralizes all project configurations, including execution flags, 
+temporal boundaries, API credentials, and spatial grid topologies.
+"""
+
 import yaml
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Optional, Tuple, List, Any
-#from entsoe import mappings
 from mappings_alt import NEIGHBOURS
 
 class PipelineConfig:

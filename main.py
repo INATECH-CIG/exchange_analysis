@@ -1,3 +1,15 @@
+"""
+Project: European Electricity Exchange Analysis
+Author: Tiernan Buckley
+Year: 2026
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+Source: https://github.com/INATECH-CIG/exchange_analysis
+
+Description:
+Orchestrates the execution of the entire data pipeline, acting as the main control panel 
+to trigger downloading, processing, analyzing, and aggregating the grid data.
+"""
+
 import sys
 from datetime import datetime
 from entsoe import EntsoePandasClient

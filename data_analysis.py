@@ -1,49 +1,80 @@
+"""
+Project: European Electricity Exchange Analysis
+Author: Tiernan Buckley
+Year: 2026
+License: Creative Commons Attribution 4.0 International (CC BY 4.0)
+Source: https://github.com/INATECH-CIG/exchange_analysis
+
+Description:
+Executes the core mathematical logic, utilizing matrix inversions to perform flow tracing 
+and copper-plate pooling calculations across the European grid.
+"""
+
 import pandas as pd
 import numpy as np
 import os
 import tqdm
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple, List, Any
 from config import PipelineConfig
 from utils import io
 
 # ==========================================
 # LOADER
 # ==========================================
-def _load_if_missing(config, gen_dfs, comm_dfs=None, phys_dfs=None):
+def _load_if_missing(
+    config: PipelineConfig, 
+    gen_dfs: Optional[Dict[str, pd.DataFrame]], 
+    comm_dfs: Optional[Dict[str, pd.DataFrame]] = None, 
+    phys_dfs: Optional[Dict[str, pd.DataFrame]] = None
+) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
     """Helper function to lazy-load datasets if not already present in memory."""
     if gen_dfs is None:
         print("Loading Gen data...")
-        gen_dir, gen_dfs = config.get_output_path("generation_demand_data_bidding_zones"), {}
+        gen_dir = config.get_output_path("generation_demand_data_bidding_zones")
+        gen_dfs = {}
         for bz in config.zones:
             df = io.load(gen_dir / f"{bz}_generation_demand_data_bidding_zones.csv", "processed_generation", config, bz=bz)
             if df is not None: gen_dfs[bz] = df.fillna(0)
+    
+    # Ensure gen_dfs is returned as a dict even if it was passed in as None and failed to load
+    if gen_dfs is None: gen_dfs = {}
 
     if comm_dfs is None:
         print("Loading Commercial Flow data...")
-        comm_dir, comm_dfs = config.get_output_path("comm_flow_total_bidding_zones"), {}
+        comm_dir = config.get_output_path("comm_flow_total_bidding_zones")
+        comm_dfs = {}
         for bz in config.zones:
             df = io.load(comm_dir / f"{bz}_comm_flow_total_bidding_zones.csv", "balanced_commercial_flows", config, bz=bz)
             if df is not None: comm_dfs[bz] = df.fillna(0)
+            
+    if comm_dfs is None: comm_dfs = {}
 
     if phys_dfs is None:
         print("Loading Physical Flow data...")
-        flow_dir, phys_dfs = config.get_output_path("physical_flow_data_bidding_zones"), {}
+        flow_dir = config.get_output_path("physical_flow_data_bidding_zones")
+        phys_dfs = {}
         for bz in config.zones:
             df = io.load(flow_dir / f"{bz}_physical_flow_data_bidding_zones.csv", "balanced_physical_flows", config, bz=bz)
             if df is not None: phys_dfs[bz] = df.fillna(0)
+            
+    if phys_dfs is None: phys_dfs = {}
     
     return gen_dfs, comm_dfs, phys_dfs
 
 # ==========================================
 # PART 1: NEIGHBOR DECOMPOSITION
 # ==========================================
-def perform_decomposition_analysis(config: PipelineConfig, gen_dfs=None, comm_dfs=None):
+def perform_decomposition_analysis(
+    config: PipelineConfig, 
+    gen_dfs: Optional[Dict[str, pd.DataFrame]] = None, 
+    comm_dfs: Optional[Dict[str, pd.DataFrame]] = None
+) -> None:
     """
     Decomposes incoming commercial flows by matching them against the generation 
     mix (fractions) of the respective source bidding zones.
     """
     print("\n=== STARTING COMMERCIAL FLOW DECOMPOSITION ===")
-    gen_dfs, comm_dfs, _ = _load_if_missing(config, gen_dfs, comm_dfs=comm_dfs)
+    gen_dfs_loaded, comm_dfs_loaded, _ = _load_if_missing(config, gen_dfs, comm_dfs=comm_dfs)
     agg_map = config.gen_types_df.groupby(['converted'])['entsoe'].apply(list).to_dict()
     base_out = config.output_dir / "comm_flow_total_bidding_zones" / str(config.year) / "results"
     
@@ -52,60 +83,64 @@ def perform_decomposition_analysis(config: PipelineConfig, gen_dfs=None, comm_df
     for k in list(dirs.keys()): dirs[f"netted_{k}"] = base_out / f"netted_{k}"
 
     print("[Decomposition] Preparing Netted Import columns...")
-    for bz, df in comm_dfs.items():
+    for bz, df in comm_dfs_loaded.items():
         for col in [col for col in df.columns if "net_export" in col and "Net Export" != col]:
             target_col = col.replace("_net_export", "_netted_import")
             # Calculate netted imports (clipping exports to 0 and taking absolute value)
             if target_col not in df.columns: df[target_col] = df[col].clip(upper=0).abs()
                 
     print("[Decomposition] Saving raw flow totals (per_bidding_zone)...")
-    for bz in comm_dfs:
-        raw_total_imports, raw_netted_imports = pd.DataFrame(index=config.time_index), pd.DataFrame(index=config.time_index)
+    for bz in comm_dfs_loaded:
+        raw_total_imports = pd.DataFrame(index=config.time_index)
+        raw_netted_imports = pd.DataFrame(index=config.time_index)
         for n in config.zones:
-            if f"{n}_{bz}" in comm_dfs[bz].columns: raw_total_imports[n] = comm_dfs[bz][f"{n}_{bz}"]
-            if f"{bz}_{n}_netted_import" in comm_dfs[bz].columns: raw_netted_imports[n] = comm_dfs[bz][f"{bz}_{n}_netted_import"]
+            if f"{n}_{bz}" in comm_dfs_loaded[bz].columns: raw_total_imports[n] = comm_dfs_loaded[bz][f"{n}_{bz}"]
+            if f"{bz}_{n}_netted_import" in comm_dfs_loaded[bz].columns: raw_netted_imports[n] = comm_dfs_loaded[bz][f"{bz}_{n}_netted_import"]
 
         io.save(raw_total_imports, dirs["per_bidding_zone"] / f"{bz}_import_comm_flow_total_per_bidding_zone.csv", "analysis_cft_total_bz", config, bz=bz)
         io.save(raw_netted_imports, dirs["netted_per_bidding_zone"] / f"{bz}_import_comm_flow_total_netted_per_bidding_zone.csv", "analysis_cft_netted_bz", config, bz=bz)
             
     print("[Decomposition] Calculating generation mix fractions...")
-    gen_fractions = {}
-    for bz, df in gen_dfs.items():
+    gen_fractions: Dict[str, pd.DataFrame] = {}
+    for bz, df in gen_dfs_loaded.items():
         total = df["Total Generation"].replace(0, 1) # Prevent DivisionByZero
         fracs = df[[c for c in df.columns if c in config.gen_types_list]].div(total, axis=0)
         if "Storage Discharge" in df.columns: fracs["Storage"] = df["Storage Discharge"] / total
         gen_fractions[bz] = fracs
 
-    valid_zones = [z for z in config.zones if z in comm_dfs]
+    valid_zones = [z for z in config.zones if z in comm_dfs_loaded]
     print(f"[Decomposition] Processing {len(valid_zones)} zones...")
 
     for i, bz in enumerate(valid_zones):
         if i % 5 == 0: print(f"   -> Processing {bz}...")
-        total_imp_list, netted_imp_list = [], []
+        total_imp_list: List[pd.DataFrame] = []
+        netted_imp_list: List[pd.DataFrame] = []
         
         for n in config.zones:
-            if f"{n}_{bz}" in comm_dfs[bz].columns:
+            if f"{n}_{bz}" in comm_dfs_loaded[bz].columns:
                 if n in gen_fractions:
                     # Multiply incoming flow by the source zone's generation mix
-                    t_df = gen_fractions[n].mul(comm_dfs[bz][f"{n}_{bz}"], axis=0)
-                    t_df.columns = [f"{n}_{c}" for c in t_df.columns]
+                    t_df = gen_fractions[n].mul(comm_dfs_loaded[bz][f"{n}_{bz}"], axis=0)
+                    t_df.columns = pd.Index([f"{n}_{c}" for c in t_df.columns])
                     total_imp_list.append(t_df)
                     
-                    if f"{bz}_{n}_netted_import" in comm_dfs[bz].columns:
-                        n_df = gen_fractions[n].mul(comm_dfs[bz][f"{bz}_{n}_netted_import"], axis=0)
-                        n_df.columns = [f"{n}_{c}" for c in n_df.columns]
+                    if f"{bz}_{n}_netted_import" in comm_dfs_loaded[bz].columns:
+                        n_df = gen_fractions[n].mul(comm_dfs_loaded[bz][f"{bz}_{n}_netted_import"], axis=0)
+                        n_df.columns = pd.Index([f"{n}_{c}" for c in n_df.columns])
                         netted_imp_list.append(n_df)
                 else:
-                    if comm_dfs[bz][f"{n}_{bz}"].sum() > 0:
+                    if comm_dfs_loaded[bz][f"{n}_{bz}"].sum() > 0:
                         print(f"      [Warning] Flow exists from {n}->{bz}, but no generation data for {n}. Skipping.")
 
         if total_imp_list:
-            total_full, netted_full = pd.concat(total_imp_list, axis=1), pd.concat(netted_imp_list, axis=1)
+            total_full = pd.concat(total_imp_list, axis=1)
+            netted_full = pd.concat(netted_imp_list, axis=1)
             io.save(total_full, dirs["per_type_per_bidding_zone"] / f"{bz}_import_comm_flow_total_per_type_per_bidding_zone.csv", "analysis_cft_total_type_bz", config, bz=bz)
             io.save(netted_full, dirs["netted_per_type_per_bidding_zone"] / f"{bz}_import_comm_flow_total_netted_per_type_per_bidding_zone.csv", "analysis_cft_netted_type_bz", config, bz=bz)
             
             # Aggregate by technology type
-            per_type, per_type_net = pd.DataFrame(index=config.time_index), pd.DataFrame(index=config.time_index)
+            per_type = pd.DataFrame(index=config.time_index)
+            per_type_net = pd.DataFrame(index=config.time_index)
             for tech in config.gen_types_list:
                 cols_exact = [c for c in total_full.columns if c.split('_')[-1].strip() == tech]
                 if cols_exact:
@@ -115,7 +150,8 @@ def perform_decomposition_analysis(config: PipelineConfig, gen_dfs=None, comm_df
             io.save(per_type_net, dirs["netted_per_type"] / f"{bz}_import_comm_flow_total_netted_per_type.csv", "analysis_cft_netted_type", config, bz=bz)
             
             # Aggregate by broader categories (e.g. Fossil, Renewable)
-            per_agg, per_agg_net = pd.DataFrame(index=config.time_index), pd.DataFrame(index=config.time_index)
+            per_agg = pd.DataFrame(index=config.time_index)
+            per_agg_net = pd.DataFrame(index=config.time_index)
             for cat, techs in agg_map.items():
                 valid = [t for t in techs if t in per_type.columns]
                 if valid: per_agg[cat], per_agg_net[cat] = per_type[valid].sum(axis=1), per_type_net[valid].sum(axis=1)
@@ -128,12 +164,23 @@ def perform_decomposition_analysis(config: PipelineConfig, gen_dfs=None, comm_df
 # ==========================================
 # PART 2 SHARED: TRACING SAVER
 # ==========================================
-def _decompose_and_save(config, traced_dfs, base_dir, label, gen_dfs):
+def _decompose_and_save(
+    config: PipelineConfig, 
+    traced_dfs: Dict[str, pd.DataFrame], 
+    base_dir: Any, 
+    label: str, 
+    gen_dfs: Dict[str, pd.DataFrame]
+) -> None:
     """Shares logic to format, decompose, and save the raw matrix outputs."""
     print(f"\n[{label.upper()}] Saving and Decomposing Traced Flows...")
     print(f"   -> Output Directory: {base_dir}")
-    per_bz_dir, per_type_dir, per_type_total_dir, per_agg_total_dir = base_dir / "per_bidding_zone", base_dir / "per_bidding_zone_per_type", base_dir / "per_type", base_dir / "per_agg_type"
-    agg_map, gen_fractions = config.gen_types_df.groupby(['converted'])['entsoe'].apply(list).to_dict(), {}
+    per_bz_dir = base_dir / "per_bidding_zone"
+    per_type_dir = base_dir / "per_bidding_zone_per_type"
+    per_type_total_dir = base_dir / "per_type"
+    per_agg_total_dir = base_dir / "per_agg_type"
+    
+    agg_map = config.gen_types_df.groupby(['converted'])['entsoe'].apply(list).to_dict()
+    gen_fractions: Dict[str, pd.DataFrame] = {}
     
     print(f"   -> Calculating source generation fractions...")
     for bz, df in gen_dfs.items():
@@ -154,11 +201,11 @@ def _decompose_and_save(config, traced_dfs, base_dir, label, gen_dfs):
             
         io.save(traced_dfs[bz], per_bz_dir / f"{bz}_import_flow_tracing_{label}_per_bidding_zone.csv", f"tracing_{label}_bz", config, bz=bz)
         
-        type_dfs = []
+        type_dfs: List[pd.DataFrame] = []
         for n in config.zones:
             if n != bz and n in traced_dfs[bz].columns and n in gen_fractions:
                 t_df = gen_fractions[n].mul(traced_dfs[bz][n], axis=0)
-                t_df.columns = [f"{n}_{c}" for c in t_df.columns]
+                t_df.columns = pd.Index([f"{n}_{c}" for c in t_df.columns])
                 type_dfs.append(t_df)
         
         if type_dfs:
@@ -182,39 +229,51 @@ def _decompose_and_save(config, traced_dfs, base_dir, label, gen_dfs):
 # ==========================================
 # PART 2A & 2B: FLOW TRACING
 # ==========================================
-def perform_aggregated_flow_tracing(config: PipelineConfig, gen_dfs=None, phys_flow_dfs=None):
+def perform_aggregated_flow_tracing(
+    config: PipelineConfig, 
+    gen_dfs: Optional[Dict[str, pd.DataFrame]] = None, 
+    phys_flow_dfs: Optional[Dict[str, pd.DataFrame]] = None
+) -> None:
     """
     Constructs and inverts the grid topology matrix to perform Aggregated Coupling Flow Tracing.
     Net positions define the nodal injections.
     """
     print("Starting Aggregated Coupling Flow Tracing...")
-    gen_dfs, _, phys_flow_dfs = _load_if_missing(config, gen_dfs, phys_dfs=phys_flow_dfs)
+    gen_dfs_loaded, _, phys_flow_dfs_loaded = _load_if_missing(config, gen_dfs, phys_dfs=phys_flow_dfs)
     for bz in config.zones:
-        if bz in gen_dfs: gen_dfs[bz] = gen_dfs[bz].resample("1h").mean().fillna(0)
-        if bz in phys_flow_dfs: phys_flow_dfs[bz] = phys_flow_dfs[bz].resample("1h").mean().fillna(0)
+        if bz in gen_dfs_loaded: gen_dfs_loaded[bz] = gen_dfs_loaded[bz].resample("1h").mean().fillna(0)
+        if bz in phys_flow_dfs_loaded: phys_flow_dfs_loaded[bz] = phys_flow_dfs_loaded[bz].resample("1h").mean().fillna(0)
 
-    agg_tracing, agg_dir, sing_times = {bz: pd.DataFrame(0.0, index=config.time_index, columns=config.zones, dtype=float) for bz in config.zones}, config.output_dir / "import_flow_tracing_bidding_zones/agg_coupling" / str(config.year), []
+    agg_tracing = {bz: pd.DataFrame(0.0, index=config.time_index, columns=config.zones, dtype=float) for bz in config.zones}
+    agg_dir = config.output_dir / "import_flow_tracing_bidding_zones/agg_coupling" / str(config.year)
+    sing_times: List[pd.Timestamp] = []
     
     print("[Agg. Coupling] Inverting Matrices...")
     for t in tqdm.tqdm(config.time_index):
-        Pin, A, net_imps = [], [], []
+        Pin: List[List[float]] = []
+        A: List[List[float]] = []
+        net_imps: List[float] = []
         
         # Build the characteristic matrix (A) and nodal input vector (Pin) for the current hour
         for bz in config.zones:
-            Pin_arr, A_arr, exports = [0] * len(config.zones), [0] * len(config.zones), 0
-            for n in [x for x in config.neighbours_map[bz] if x in config.zones and f"{bz}_{x}_net_export" in phys_flow_dfs[bz].columns]:
-                val = phys_flow_dfs[bz].at[t, f"{bz}_{n}_net_export"]
-                if val < 0: A_arr[config.zones.index(n)] = val
-                else: exports += val
+            Pin_arr: List[float] = [0.0] * len(config.zones)
+            A_arr: List[float] = [0.0] * len(config.zones)
+            exports: float = 0.0
             
-            net_exp = phys_flow_dfs[bz].at[t, "Net Export"]
+            for n in [x for x in config.neighbours_map[bz] if x in config.zones and f"{bz}_{x}_net_export" in phys_flow_dfs_loaded[bz].columns]:
+                val = phys_flow_dfs_loaded[bz].at[t, f"{bz}_{n}_net_export"]
+                if val < 0: A_arr[config.zones.index(n)] = float(val)
+                else: exports += float(val)
+            
+            net_exp = float(phys_flow_dfs_loaded[bz].at[t, "Net Export"])
             if net_exp > 0:
                 Pin_arr[config.zones.index(bz)], A_arr[config.zones.index(bz)] = net_exp, exports
-                net_imps.append(0)
+                net_imps.append(0.0)
             else:
                 A_arr[config.zones.index(bz)] = exports + abs(net_exp)
                 net_imps.append(-net_exp)
-            Pin.append(Pin_arr); A.append(A_arr)
+            Pin.append(Pin_arr)
+            A.append(A_arr)
         
         # Perform Flow Tracing inversion
         try:
@@ -230,35 +289,50 @@ def perform_aggregated_flow_tracing(config: PipelineConfig, gen_dfs=None, phys_f
                 agg_tracing[x].loc[t] = np.nan
             
     io.save(pd.DataFrame(sing_times, columns=["Timepoints"]), agg_dir / "incalculable_timepoints/incalculable_timepoints.csv", "tracing_ac_missing_times", config)
-    _decompose_and_save(config, agg_tracing, agg_dir, "agg_coupling", gen_dfs)
+    _decompose_and_save(config, agg_tracing, agg_dir, "agg_coupling", gen_dfs_loaded)
 
-def perform_direct_flow_tracing(config: PipelineConfig, gen_dfs=None, phys_flow_dfs=None):
+def perform_direct_flow_tracing(
+    config: PipelineConfig, 
+    gen_dfs: Optional[Dict[str, pd.DataFrame]] = None, 
+    phys_flow_dfs: Optional[Dict[str, pd.DataFrame]] = None
+) -> None:
     """
     Constructs and inverts the grid topology matrix for Direct Coupling Flow Tracing.
     Uses absolute internal generation and demand as nodal properties.
     """
     print("Starting Direct Coupling Flow Tracing...")
-    gen_dfs, _, phys_flow_dfs = _load_if_missing(config, gen_dfs, phys_dfs=phys_flow_dfs)
+    gen_dfs_loaded, _, phys_flow_dfs_loaded = _load_if_missing(config, gen_dfs, phys_dfs=phys_flow_dfs)
     for bz in config.zones:
-        if bz in gen_dfs: gen_dfs[bz] = gen_dfs[bz].resample("1h").mean().fillna(0)
-        if bz in phys_flow_dfs: phys_flow_dfs[bz] = phys_flow_dfs[bz].resample("1h").mean().fillna(0)
+        if bz in gen_dfs_loaded: gen_dfs_loaded[bz] = gen_dfs_loaded[bz].resample("1h").mean().fillna(0)
+        if bz in phys_flow_dfs_loaded: phys_flow_dfs_loaded[bz] = phys_flow_dfs_loaded[bz].resample("1h").mean().fillna(0)
 
-    dir_tracing, dir_dir, sing_times = {bz: pd.DataFrame(0.0, index=config.time_index, columns=config.zones, dtype=float) for bz in config.zones}, config.output_dir / "import_flow_tracing_bidding_zones/direct_coupling" / str(config.year), []
+    dir_tracing = {bz: pd.DataFrame(0.0, index=config.time_index, columns=config.zones, dtype=float) for bz in config.zones}
+    dir_dir = config.output_dir / "import_flow_tracing_bidding_zones/direct_coupling" / str(config.year)
+    sing_times: List[pd.Timestamp] = []
     
     print("[Direct Coupling] Inverting Matrices...")
     for t in tqdm.tqdm(config.time_index):
-        Gin, A, demands = [], [], []
+        Gin: List[List[float]] = []
+        A: List[List[float]] = []
+        demands: List[float] = []
         
         # Build the characteristic matrix (A) and nodal input vector (Gin) for the current hour
         for bz in config.zones:
-            Gin_arr, A_arr, exports = [0] * len(config.zones), [0] * len(config.zones), 0
-            gen_val, load_val, net_exp = gen_dfs[bz].at[t, "Total Generation"], gen_dfs[bz].at[t, "Total Load"], phys_flow_dfs[bz].at[t, "Net Export"]
-            alt_gen, alt_demand = load_val + net_exp, gen_val - net_exp
+            Gin_arr: List[float] = [0.0] * len(config.zones)
+            A_arr: List[float] = [0.0] * len(config.zones)
+            exports: float = 0.0
             
-            for n in [x for x in config.neighbours_map[bz] if x in config.zones and f"{bz}_{x}_net_export" in phys_flow_dfs[bz].columns]:
-                val = phys_flow_dfs[bz].at[t, f"{bz}_{n}_net_export"]
-                if val < 0: A_arr[config.zones.index(n)] = val
-                else: exports += val
+            gen_val = float(gen_dfs_loaded[bz].at[t, "Total Generation"])
+            load_val = float(gen_dfs_loaded[bz].at[t, "Total Load"])
+            net_exp = float(phys_flow_dfs_loaded[bz].at[t, "Net Export"])
+            
+            alt_gen = load_val + net_exp
+            alt_demand = gen_val - net_exp
+            
+            for n in [x for x in config.neighbours_map[bz] if x in config.zones and f"{bz}_{x}_net_export" in phys_flow_dfs_loaded[bz].columns]:
+                val = phys_flow_dfs_loaded[bz].at[t, f"{bz}_{n}_net_export"]
+                if val < 0: A_arr[config.zones.index(n)] = float(val)
+                else: exports += float(val)
             
             if load_val > 0:
                 Gin_arr[config.zones.index(bz)], A_arr[config.zones.index(bz)] = (alt_gen if alt_gen > 0 else gen_val), load_val + exports
@@ -268,8 +342,10 @@ def perform_direct_flow_tracing(config: PipelineConfig, gen_dfs=None, phys_flow_
                 demands.append(alt_demand)
             else:
                 Gin_arr[config.zones.index(bz)], A_arr[config.zones.index(bz)] = exports, exports
-                demands.append(0)
-            Gin.append(Gin_arr); A.append(A_arr)
+                demands.append(0.0)
+                
+            Gin.append(Gin_arr)
+            A.append(A_arr)
             
         # Perform Flow Tracing inversion
         try:
@@ -285,32 +361,37 @@ def perform_direct_flow_tracing(config: PipelineConfig, gen_dfs=None, phys_flow_
                 dir_tracing[x].loc[t] = np.nan
     
     io.save(pd.DataFrame(sing_times, columns=["Timepoints"]), dir_dir / "incalculable_timepoints/incalculable_timepoints.csv", "tracing_dc_missing_times", config)
-    _decompose_and_save(config, dir_tracing, dir_dir, "direct_coupling", gen_dfs)
+    _decompose_and_save(config, dir_tracing, dir_dir, "direct_coupling", gen_dfs_loaded)
 
 # ==========================================
 # PART 3: POOLING
 # ==========================================
-
-def perform_pooling_analysis(config: PipelineConfig, gen_dfs=None, comm_dfs=None, phys_flow_dfs=None):
+def perform_pooling_analysis(
+    config: PipelineConfig, 
+    gen_dfs: Optional[Dict[str, pd.DataFrame]] = None, 
+    comm_dfs: Optional[Dict[str, pd.DataFrame]] = None, 
+    phys_flow_dfs: Optional[Dict[str, pd.DataFrame]] = None
+) -> None:
     """
     Implements a 'Copper Plate' pooling analysis where net imports are proportionally 
     sourced from all net exporters in the network, disregarding exact grid topology.
     """
     print("\n=== STARTING POOLING ANALYSIS ===")
-    gen_dfs, comm_dfs, phys_flow_dfs = _load_if_missing(config, gen_dfs, comm_dfs, phys_flow_dfs)
+    gen_dfs_loaded, comm_dfs_loaded, phys_flow_dfs_loaded = _load_if_missing(config, gen_dfs, comm_dfs, phys_flow_dfs)
     
     print("[Pooling] 1/4: Calculating generation fractions for all zones...")
-    gen_fractions = {}
-    for i, (bz, df) in enumerate(gen_dfs.items()):
+    gen_fractions: Dict[str, pd.DataFrame] = {}
+    for i, (bz, df) in enumerate(gen_dfs_loaded.items()):
         if i % 10 == 0: print(f"   -> Processing fractions for {bz}...")
         total = df["Total Generation"].replace(0, 1)
         fracs = df[[c for c in df.columns if c in config.gen_types_list]].div(total, axis=0) 
         if "Storage Discharge" in df.columns: fracs["Storage"] = df["Storage Discharge"] / total
         gen_fractions[bz] = fracs.loc[:, ~fracs.columns.duplicated()].fillna(0.0)
         
-    agg_map, base_pool = config.gen_types_df.groupby(['converted'])['entsoe'].apply(list).to_dict(), config.output_dir / "pooling" / str(config.year)
+    agg_map = config.gen_types_df.groupby(['converted'])['entsoe'].apply(list).to_dict()
+    base_pool = config.output_dir / "pooling" / str(config.year)
 
-    def save_pool(pooled_dict, name, file_p):
+    def save_pool(pooled_dict: Dict[str, pd.DataFrame], name: str, file_p: str) -> None:
         print(f"   -> Saving results for method: {name}")
         dirs = {k: base_pool / name / k for k in ["per_bidding_zone", "per_type_per_bidding_zone", "per_type", "per_agg_type"]}
         
@@ -324,10 +405,10 @@ def perform_pooling_analysis(config: PipelineConfig, gen_dfs=None, comm_dfs=None
                 
             io.save(df_imp, dirs["per_bidding_zone"] / f"{bz}_pooled_{file_p}_per_bidding_zone.csv", f"pool_{name}_bz", config, bz=bz)
             
-            type_dfs = []
+            type_dfs: List[pd.DataFrame] = []
             for src in [s for s in config.zones if s in df_imp.columns and s in gen_fractions]:
                 t = gen_fractions[src].mul(df_imp[src], axis=0)
-                t.columns = [f"{src}_{c}" for c in t.columns]
+                t.columns = pd.Index([f"{src}_{c}" for c in t.columns])
                 type_dfs.append(t)
             
             if type_dfs:
@@ -347,16 +428,21 @@ def perform_pooling_analysis(config: PipelineConfig, gen_dfs=None, comm_dfs=None
                 io.save(per_agg, dirs["per_agg_type"] / f"{bz}_pooled_{file_p}_per_agg_type.csv", f"pool_{name}_agg", config, bz=bz)
 
     # Establish system-wide export/import matrices to calculate proportional shares
-    tot_exp, tot_imp, net_exp, net_imp, p_exp, p_imp = pd.DataFrame(index=config.time_index), pd.DataFrame(index=config.time_index), pd.DataFrame(index=config.time_index), pd.DataFrame(index=config.time_index), pd.DataFrame(index=config.time_index), pd.DataFrame(index=config.time_index)
+    tot_exp = pd.DataFrame(index=config.time_index)
+    tot_imp = pd.DataFrame(index=config.time_index)
+    net_exp = pd.DataFrame(index=config.time_index)
+    net_imp = pd.DataFrame(index=config.time_index)
+    p_exp = pd.DataFrame(index=config.time_index)
+    p_imp = pd.DataFrame(index=config.time_index)
     
     for bz in config.zones:
-        if bz in comm_dfs:
-            links = [c for c in comm_dfs[bz].columns if "net_export" in c and "Net Export" != c]
-            tot_exp[bz], tot_imp[bz] = comm_dfs[bz][links].clip(lower=0).sum(axis=1), comm_dfs[bz][links].clip(upper=0).abs().sum(axis=1)
-            v = comm_dfs[bz]["Net Export"]
+        if bz in comm_dfs_loaded:
+            links = [c for c in comm_dfs_loaded[bz].columns if "net_export" in c and "Net Export" != c]
+            tot_exp[bz], tot_imp[bz] = comm_dfs_loaded[bz][links].clip(lower=0).sum(axis=1), comm_dfs_loaded[bz][links].clip(upper=0).abs().sum(axis=1)
+            v = comm_dfs_loaded[bz]["Net Export"]
             net_exp[bz], net_imp[bz] = v.clip(lower=0), v.clip(upper=0).abs()
-        if bz in phys_flow_dfs:
-            v_p = phys_flow_dfs[bz]["Net Export"]
+        if bz in phys_flow_dfs_loaded:
+            v_p = phys_flow_dfs_loaded[bz]["Net Export"]
             p_exp[bz], p_imp[bz] = v_p.clip(lower=0), v_p.clip(upper=0).abs()
 
     print("\n[Pooling] 2/4: Calculating Commercial Link-Based Mix...")
@@ -373,7 +459,7 @@ def perform_pooling_analysis(config: PipelineConfig, gen_dfs=None, comm_dfs=None
 # ==========================================
 # PART 4: POST PROCESSING AGGREGATION
 # ==========================================
-def perform_post_processing_aggregation(config: PipelineConfig):
+def perform_post_processing_aggregation(config: PipelineConfig) -> None:
     """
     Aggregates high-granularity hourly MW flows into final annual TWh totals
     for high-level methodology comparison.
@@ -392,17 +478,20 @@ def perform_post_processing_aggregation(config: PipelineConfig):
     totals_out = base_out / f"annual_totals_per_method/{year}"
     sub_outs = {k: totals_out / v for k,v in [("imp_bz", "import/per_bidding_zone"), ("exp_bz", "export/per_bidding_zone"), ("imp_type", "import/per_type"), ("exp_type", "export/per_type"), ("imp_agg", "import/per_agg_type")]}
 
-    def load_clean(path, table_prefix, bz, drop=None):
+    def load_clean(path: Any, table_prefix: str, bz: str, drop: Optional[str] = None) -> Optional[pd.DataFrame]:
         df = io.load(path, table_prefix, config, bz=bz)
         if df is None: return None
         df = df.loc[:, ~df.columns.duplicated()].apply(pd.to_numeric, errors='coerce').fillna(0.0)
         if drop and drop in df.columns: df = df.drop(columns=[drop])
         return df
 
-    missing_times, missing_df = [], io.load(base_out / f"import_flow_tracing_bidding_zones/agg_coupling/{year}/incalculable_timepoints/incalculable_timepoints.csv", "tracing_ac_missing_times", config)
-    if missing_df is not None and "Timepoints" in missing_df.columns: missing_times = pd.to_datetime(missing_df["Timepoints"], utc=True)
+    missing_times: pd.DatetimeIndex = pd.DatetimeIndex([])
+    missing_df = io.load(base_out / f"import_flow_tracing_bidding_zones/agg_coupling/{year}/incalculable_timepoints/incalculable_timepoints.csv", "tracing_ac_missing_times", config)
+    if missing_df is not None and "Timepoints" in missing_df.columns: 
+        missing_times = pd.to_datetime(missing_df["Timepoints"], utc=True)
 
-    gen_dir, gen_fractions = config.get_output_path("generation_demand_data_bidding_zones"), {}
+    gen_dir = config.get_output_path("generation_demand_data_bidding_zones")
+    gen_fractions: Dict[str, pd.DataFrame] = {}
     for bz in config.zones:
         df = load_clean(gen_dir / f"{bz}_generation_demand_data_bidding_zones.csv", "processed_generation", bz)
         if df is not None:
@@ -412,22 +501,27 @@ def perform_post_processing_aggregation(config: PipelineConfig):
             if "Storage Discharge" in df.columns: fracs["Storage"] = df["Storage Discharge"] / total
             gen_fractions[bz] = fracs.loc[:, ~fracs.columns.duplicated()].fillna(0.0)
 
-    imports = {m: {} for m in paths}
+    imports: Dict[str, Dict[str, Optional[pd.DataFrame]]] = {m: {} for m in paths}
     for bz in config.zones:
         for m, (base_p, prefix, fname_template) in paths.items():
             imports[m][bz] = load_clean(base_p / fname_template.format(bz=bz), prefix, bz, drop=bz)
         
-        ac, pooled = imports["AC Flow Tracing"].get(bz), imports["Pooled Net Phys."].get(bz)
+        ac = imports["AC Flow Tracing"].get(bz)
+        pooled = imports["Pooled Net Phys."].get(bz)
         if ac is not None and len(missing_times) > 0 and pooled is not None:
             intersect = ac.index.intersection(missing_times)
             if not intersect.empty: ac.loc[intersect] = pooled.loc[intersect]
         imports["AC Flow Tracing"][bz] = ac
 
-    target_cols, agg_map = list(set(config.gen_types_list)), config.gen_types_df.groupby(['converted'])['entsoe'].apply(list).to_dict()
+    target_cols = list(set(config.gen_types_list))
+    agg_map = config.gen_types_df.groupby(['converted'])['entsoe'].apply(list).to_dict()
 
     print("[Aggregation] Calculating Annual Totals...")
     for bz in config.zones:
-        res_imp_bz, res_exp_bz, res_imp_type, res_exp_type = pd.DataFrame(dtype=float), pd.DataFrame(dtype=float), pd.DataFrame(dtype=float), pd.DataFrame(dtype=float)
+        res_imp_bz = pd.DataFrame(dtype=float)
+        res_exp_bz = pd.DataFrame(dtype=float)
+        res_imp_type = pd.DataFrame(dtype=float)
+        res_exp_type = pd.DataFrame(dtype=float)
         
         for m in paths:
             df_imp = imports[m].get(bz)
@@ -448,7 +542,8 @@ def perform_post_processing_aggregation(config: PipelineConfig):
                 n_imp = imports[m].get(n)
                 if n_imp is not None and bz in n_imp.columns:
                     flow = n_imp[bz].fillna(0.0)
-                    res_exp_bz.loc[m, n], h_exp = flow.sum(), h_exp + flow
+                    res_exp_bz.loc[m, n] = flow.sum()
+                    h_exp = h_exp + flow
             
             if bz in gen_fractions:
                 decomp = gen_fractions[bz].mul(h_exp, axis=0)
