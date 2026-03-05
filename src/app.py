@@ -11,49 +11,51 @@ from entsoe.geo.utils import load_zones
 from mappings_alt import NEIGHBOURS
 from utils import io
 
+# ==========================================
+# 0. CONFIG & CONSTANTS
+# ==========================================
 FLOW_TYPES = {
-    "Physical": {
-        "table": "processed_physical_flows", 
-        "folder": "physical_flow_bidding_zones"
-    },
-    "Commercial Total": {
-        "table": "processed_commercial_flows", 
-        "folder": "comm_flow_total_bidding_zones"
-    },
-    "Commercial Day-Ahead": {
-        "table": "processed_commercial_flows_da", 
-        "folder": "comm_flow_dayahead_bidding_zones"
-    }
+    "Physical": {"table": "processed_physical_flows", "agg_table": "analysis_cft_netted_type", "folder": "physical_flow_bidding_zones", "type": "standard"},
+    "Commercial Total": {"table": "processed_commercial_flows", "agg_table": "analysis_cft_total_type", "folder": "comm_flow_total_bidding_zones", "type": "standard"},
+    "Commercial Day-Ahead": {"table": "processed_commercial_flows_da", "agg_table": None, "folder": "comm_flow_dayahead_bidding_zones", "type": "standard"},
+    "Agg. Coupling Flow Tracing": {"table": "tracing_agg_coupling_bz", "agg_table": "tracing_agg_coupling_type", "folder": "import_flow_tracing_bidding_zones/agg_coupling", "type": "tracing"},
+    "Direct Coupling Flow Tracing": {"table": "tracing_direct_coupling_bz", "agg_table": "tracing_direct_coupling_type", "folder": "import_flow_tracing_bidding_zones/direct_coupling", "type": "tracing"},
+    "Net Pooled CFT": {"table": "pool_commercial_net_pos_bz", "agg_table": "pool_commercial_net_pos_type", "folder": "pooling/commercial_net_pos", "type": "tracing"}
 }
 
-# ==========================================
-# 0. MOCK CONFIG (Optimized for 24h Windows)
-# ==========================================
+GEN_COLORS = {
+    "Fossil Gas": "#e67e22", "Fossil Hard coal": "#34495e", "Nuclear": "#9b59b6",
+    "Wind Onshore": "#3498db", "Wind Offshore": "#2980b9", "Solar": "#f1c40f",
+    "Biomass": "#27ae60", "Hydro Run-of-river and poundage": "#16a085",
+    "Hydro Water Reservoir": "#1abc9c", "Geothermal": "#d35400", "Other": "#95a5a6",
+    "Fossil Oil": "#2c3e50", "Waste": "#7f8c8d", "Storage Discharge": "#34495e"
+}
+
 class MockConfig:
-    """A minimal object to keep io.load() happy and fast."""
     def __init__(self, selected_date):
-        # selected_date is a datetime.date object from the sidebar
         self.year = selected_date.year
         self.output_dir = Path(__file__).parent.parent / "outputs"
-        self.load_source = 'db' # Primary source is PostgreSQL
-        self.save_db = True
-        self.save_csv = True
-        
-        # Midnight to Midnight (24h window) for the DB Query
+        self.load_source, self.save_db, self.save_csv = 'db', True, True
         self.start = pd.Timestamp(selected_date).tz_localize("UTC")
         self.end = self.start + pd.Timedelta(hours=23, minutes=59, seconds=59)
 
 def get_clean_zones():
-    all_zones = list(NEIGHBOURS.keys())
-    to_remove = ["DE_AT_LU", "IE_SEM", "IE", "NIE", "MT", 
-                 "IT", "IT_BRNN", "IT_ROSN", "IT_FOGN"]
-    return [z for z in all_zones if z not in to_remove]
+    to_remove = ["DE_AT_LU", "IE_SEM", "IE", "NIE", "MT", "IT", "IT_BRNN", "IT_ROSN", "IT_FOGN"]
+    return sorted([z for z in NEIGHBOURS.keys() if z not in to_remove])
 
-# ==========================================
-# 1. PAGE SETUP
-# ==========================================
-st.set_page_config(page_title="European Grid Analysis", layout="wide")
-st.title("⚡ European Electricity Flow Tracing")
+def get_bearing(lon1, lat1, lon2, lat2):
+    d_lon = lon2 - lon1
+    y = np.sin(np.radians(d_lon)) * np.cos(np.radians(lat2))
+    x = np.cos(np.radians(lat1)) * np.sin(np.radians(lat2)) - \
+        np.sin(np.radians(lat1)) * np.cos(np.radians(lat2)) * np.cos(np.radians(d_lon))
+    return (np.degrees(np.arctan2(y, x)) + 360) % 360
+
+def get_curve(p1, p2, num_points=20):
+    lons, lats = np.linspace(p1[0], p2[0], num_points), np.linspace(p1[1], p2[1], num_points)
+    dist = np.sqrt((p2[0]-p1[0])**2 + (p2[1]-p1[1])**2)
+    offset = dist * 0.15 
+    shift = offset * np.sin(np.linspace(0, np.pi, num_points))
+    return lons + shift*0.2, lats + shift
 
 # ==========================================
 # 2. DATA LOADING
@@ -63,213 +65,212 @@ def load_geography(active_zones):
     custom_zones = ["GB", "ME", "BA", "MK"]
     entsoe_zones = [z for z in active_zones if z not in custom_zones]
     geo_df = load_zones(entsoe_zones, pd.Timestamp('2024-01-01'))
-    
     input_dir = Path(__file__).parent.parent / "inputs"
     for country in custom_zones:
         try:
             zone = gpd.read_file(input_dir / f"zones/{country}.geojson")
             geo_df.loc[country] = zone["geometry"][0]
         except: continue
-
-    geo_df['lon'] = geo_df.geometry.centroid.x
-    geo_df['lat'] = geo_df.geometry.centroid.y
-    geoj = json.loads(geo_df.to_json())
-    return geo_df.drop(["geometry"], axis=1), geoj
+    geo_df['lon'], geo_df['lat'] = geo_df.geometry.centroid.x, geo_df.geometry.centroid.y
+    return geo_df.drop(["geometry"], axis=1), json.loads(geo_df.to_json())
 
 @st.cache_data
-def load_real_flows(target_bz, selected_date, selected_hour, flow_settings):
+def load_full_day_data(selected_date, flow_settings):
     mock_config = MockConfig(selected_date)
-    folder = flow_settings["folder"]
-    table = flow_settings["table"]
-    path = mock_config.output_dir / folder / str(mock_config.year) / f"{target_bz}_{folder}.csv"
-    
+    is_comm = "comm_flow" in flow_settings["folder"]
+    subfolder = "per_bidding_zone" if flow_settings["type"] == "tracing" else "results/per_bidding_zone" if is_comm else ""
+    path = mock_config.output_dir / flow_settings["folder"] / str(mock_config.year) / subfolder / "daily_dump.csv"
+    return io.load(path, flow_settings["table"], mock_config, bz=None)
+
+@st.cache_data
+def load_generation_data(selected_date, target_bz):
+    mock_config = MockConfig(selected_date)
+    path = mock_config.output_dir / "generation_demand_data_bidding_zones" / str(mock_config.year) / f"{target_bz}_gen.csv"
+    return io.load(path, "processed_generation", mock_config, bz=target_bz)
+
+@st.cache_data
+def load_import_mix(selected_date, target_bz, flow_settings):
+    table = flow_settings.get("agg_table")
+    if not table: return None
+    mock_config = MockConfig(selected_date)
+    path = mock_config.output_dir / "placeholder.csv"
     df = io.load(path, table, mock_config, bz=target_bz)
-    if df is None or df.empty: return []
+    if df is not None and not df.empty:
+        rename_map = {col: col.split("_")[-1] for col in df.columns if "_" in col}
+        df = df.rename(columns=rename_map)
+        return df.T.groupby(level=0).sum().T
+    return df
 
-    target_time = pd.to_datetime(f"{selected_date} {selected_hour:02d}:00:00").tz_localize('UTC')
-    if target_time not in df.index: return []
-    
-    row = df.loc[target_time]
+def extract_arrow_flows(target_bz, hourly_all, active_zones, flow_settings):
     active_flows = []
-    
-    for col in df.columns:
-        if "_net_export" in col:
-            val = row[col]
-            if abs(val) > 10: 
-                pair = col.replace("_net_export", "")
-                
-                # Logic: val > 0 is EXPORT from target_bz. val < 0 is IMPORT to target_bz.
-                if pair.startswith(f"{target_bz}_"):
-                    other_bz = pair.replace(f"{target_bz}_", "")
-                    direction = 'import' if val < 0 else 'export'
-                    source = other_bz if val < 0 else target_bz
-                    target = target_bz if val < 0 else other_bz
-                elif pair.endswith(f"_{target_bz}"):
-                    other_bz = pair.replace(f"_{target_bz}", "")
-                    # Note: order is flipped in column name, so sign logic flips
-                    direction = 'export' if val < 0 else 'import'
-                    source = target_bz if val < 0 else other_bz
-                    target = other_bz if val < 0 else target_bz
-                else: continue
-
-                active_flows.append({
-                    "source": source, "target": target,
-                    "mw": abs(val), 
-                    "label": f"{abs(val)/1000:.1f} GW",
-                    "flow_type": direction # 'import' or 'export'
-                })
+    if flow_settings.get("type") == "tracing":
+        target_row = hourly_all[hourly_all['bidding_zone'] == target_bz]
+        for source_bz in active_zones:
+            if source_bz == target_bz: continue
+            if not target_row.empty and source_bz in target_row.columns:
+                val = target_row[source_bz].iloc[0]
+                if val > 10: active_flows.append({"Source": source_bz, "Target": target_bz, "MW": val, "Type": "Import"})
+            source_row = hourly_all[hourly_all['bidding_zone'] == source_bz]
+            if not source_row.empty and target_bz in source_row.columns:
+                val = source_row[target_bz].iloc[0]
+                if val > 10: active_flows.append({"Source": target_bz, "Target": source_bz, "MW": val, "Type": "Export"})
+    else:
+        focus_row = hourly_all[hourly_all['bidding_zone'] == target_bz]
+        if focus_row.empty: return []
+        for col in focus_row.columns:
+            if "_net_export" in col:
+                val = focus_row[col].iloc[0]
+                if abs(val) > 10:
+                    pair = col.replace("_net_export", "")
+                    if pair.startswith(f"{target_bz}_"):
+                        other = pair.replace(f"{target_bz}_", ""); direction = 'Import' if val < 0 else 'Export'
+                        s, t = (other, target_bz) if val < 0 else (target_bz, other)
+                    elif pair.endswith(f"_{target_bz}"):
+                        other = pair.replace(f"_{target_bz}", ""); direction = 'Export' if val < 0 else 'Import'
+                        s, t = (target_bz, other) if val < 0 else (other, target_bz)
+                    active_flows.append({"Source": s, "Target": t, "MW": abs(val), "Type": direction})
     return active_flows
 
 # ==========================================
-# 3. UTILS & MAP GENERATOR
+# 3. MAP GENERATOR
 # ==========================================
-def get_bearing(lon1, lat1, lon2, lat2):
-    d_lon = lon2 - lon1
-    y = np.sin(np.radians(d_lon)) * np.cos(np.radians(lat2))
-    x = np.cos(np.radians(lat1)) * np.sin(np.radians(lat2)) - \
-        np.sin(np.radians(lat1)) * np.cos(np.radians(lat2)) * np.cos(np.radians(d_lon))
-    return (np.degrees(np.arctan2(y, x)) + 360) % 360
-
-def draw_flow_map(geo_df, geoj, flows):
+def draw_flow_map(geo_df, geoj, flows, hourly_all, target_bz, flow_type_meta):
     fig = go.Figure()
+    hover_labels, z_values, b_colors, b_widths = [], [], [], []
+    bz_cols = [c for c in hourly_all.columns if c in geo_df.index]
+    relevant_lons, relevant_lats = [geo_df.loc[target_bz, 'lon']], [geo_df.loc[target_bz, 'lat']]
+
+    for zone in geo_df.index:
+        val_gw = 0.0
+        if flow_type_meta == "tracing":
+            exports = hourly_all[zone].sum() if zone in hourly_all.columns else 0
+            imports = hourly_all[hourly_all['bidding_zone'] == zone][bz_cols].sum(axis=1).sum()
+            val_gw = (exports - imports) / 1000
+        else:
+            zone_row = hourly_all[hourly_all['bidding_zone'] == zone]
+            if not zone_row.empty and 'Net Export' in zone_row.columns: val_gw = zone_row['Net Export'].iloc[0] / 1000
+        
+        if zone == target_bz:
+            b_colors.append('#000000'); b_widths.append(2.0); z_values.append(1 if val_gw >= 0 else -1)
+        else:
+            b_colors.append('#adb5bd'); b_widths.append(0.8); z_values.append(0)
+
+        hover_labels.append(f"<b>{zone}</b><br>{'Exporting' if val_gw >= 0 else 'Importing'}: {abs(val_gw):.2f} GW")
+
     fig.add_trace(go.Choropleth(
-        geojson=geoj, locations=geo_df.index, z=[0] * len(geo_df),
-        colorscale=[[0, '#f8f9fa'], [1, '#f8f9fa']], showscale=False,
-        marker_line_color='#adb5bd', marker_line_width=1
+        geojson=geoj, locations=geo_df.index, z=z_values, text=hover_labels, hoverinfo="text",
+        colorscale=[[0, '#e3f2fd'], [0.5, '#ffffff'], [1, '#e8f5e9']], zmin=-1, zmax=1, showscale=False, 
+        marker_line_color=b_colors, marker_line_width=b_widths
     ))
 
-    # Define our colors
-    COLOR_MAP = {
-        'export': {'line': 'rgba(40, 167, 69, 0.6)', 'arrow': '#28a745', 'text': '#155724'}, # Green
-        'import': {'line': 'rgba(0, 123, 255, 0.6)', 'arrow': '#007bff', 'text': '#004085'}  # Blue
-    }
-
+    COLOR_MAP = {'Export': {'l': 'rgba(40, 167, 69, 0.4)', 'a': '#28a745', 't': '#1e7e34'},
+                 'Import': {'l': 'rgba(0, 123, 255, 0.4)', 'a': '#007bff', 't': '#0056b3'}}
+    
     for flow in flows:
-        if flow['source'] in geo_df.index and flow['target'] in geo_df.index:
-            s_lon, s_lat = geo_df.loc[flow['source'], 'lon'], geo_df.loc[flow['source'], 'lat']
-            t_lon, t_lat = geo_df.loc[flow['target'], 'lon'], geo_df.loc[flow['target'], 'lat']
-            
-            # Select colors based on flow direction
-            colors = COLOR_MAP.get(flow['flow_type'])
-            
-            width = max(2, flow['mw'] / 1000 * 2.5) 
-            angle = get_bearing(s_lon, s_lat, t_lon, t_lat)
+        p1, p2 = (geo_df.loc[flow['Source'], 'lon'], geo_df.loc[flow['Source'], 'lat']), (geo_df.loc[flow['Target'], 'lon'], geo_df.loc[flow['Target'], 'lat'])
+        relevant_lons.extend([p1[0], p2[0]]); relevant_lats.extend([p1[1], p2[1]])
+        c = COLOR_MAP.get(flow['Type'])
+        cLons, cLats = get_curve(p1, p2)
+        fig.add_trace(go.Scattergeo(lon=cLons, lat=cLats, mode='lines', line=dict(width=max(1.5, flow['MW']/500), color=c['l']), hoverinfo='none'))
+        mid = len(cLons)//2
+        fig.add_trace(go.Scattergeo(lon=[cLons[mid]], lat=[cLats[mid]], mode='markers+text', text=[f"<b>{flow['MW']/1000:.1f}</b>"], 
+                                    textposition="top center", marker=dict(size=12, symbol='triangle-up', color=c['a'], angle=get_bearing(p1[0], p1[1], p2[0], p2[1]), line=dict(color='white', width=1)),
+                                    textfont=dict(size=12, color=c['t'], family="Arial Black"), hoverinfo='none'))
 
-            # Flow Line
-            fig.add_trace(go.Scattergeo(
-                lon=[s_lon, t_lon], lat=[s_lat, t_lat],
-                mode='lines', line=dict(width=width, color=colors['line']),
-                hoverinfo='none'
-            ))
-
-            # Directional Arrow & Label
-            mid_lon, mid_lat = (s_lon + t_lon) / 2, (s_lat + t_lat) / 2
-            fig.add_trace(go.Scattergeo(
-                lon=[mid_lon], lat=[mid_lat],
-                mode='markers+text', text=[flow['label']],
-                textposition="top center",
-                marker=dict(size=12, symbol='triangle-up', color=colors['arrow'], angle=angle),
-                textfont=dict(size=13, color=colors['text'], family="Arial Black")
-            ))
-
+    pad = 2.5
     fig.update_layout(
-        geo=dict(fitbounds="locations", visible=False, projection_type="mercator"),
-        margin={"r":0,"t":0,"l":0,"b":0}, height=800, showlegend=False
+        geo=dict(projection_type="mercator", lonaxis_range=[min(relevant_lons)-pad, max(relevant_lons)+pad], lataxis_range=[min(relevant_lats)-pad, max(relevant_lats)+pad], visible=False), 
+        margin={"r":0,"t":0,"l":0,"b":0}, height=650, showlegend=False, clickmode='event+select', hoverlabel=dict(bgcolor="white", font_size=13, font_family="Arial")
     )
     return fig
 
 # ==========================================
-# 5. RENDER DASHBOARD
+# 4. INTERFACE
 # ==========================================
+st.set_page_config(page_title="European Grid Analysis", layout="wide")
+st.markdown("<style>.main > div {padding-left: 2rem; padding-right: 2rem; max-width: 100%;} [data-testid='stMetricDelta'] svg { display: none !important; }</style>", unsafe_allow_html=True)
+
+st.title("⚡ European Electricity Market Exchange Analysis")
 active_zones = get_clean_zones()
 
-st.sidebar.header("Control Panel")
-target_bz = st.sidebar.selectbox("Focus Bidding Zone", active_zones, index=active_zones.index("DE_LU"))
+if "target_bz" not in st.session_state: st.session_state.target_bz = "DE_LU"
+if "hour_val" not in st.session_state: st.session_state.hour_val = 12
+if "flow_method" not in st.session_state: st.session_state.flow_method = "Physical"
+
+st.sidebar.header("Select Data:")
+selected_bz = st.sidebar.selectbox("Bidding Zone", active_zones, index=active_zones.index(st.session_state.target_bz))
+if selected_bz != st.session_state.target_bz: st.session_state.target_bz = selected_bz; st.rerun()
+
 date = st.sidebar.date_input("Day", pd.to_datetime("2026-01-10"))
-hour = st.sidebar.slider("Hour (UTC)", 0, 23, 12)
+flow_options = list(FLOW_TYPES.keys())
+selected_method = st.sidebar.radio("Flow Methodology", flow_options, index=flow_options.index(st.session_state.flow_method))
+if selected_method != st.session_state.flow_method: st.session_state.flow_method = selected_method; st.rerun()
 
-# In Step 4: INTERFACE
-st.sidebar.header("Data Selection")
-flow_choice = st.sidebar.radio("Flow Methodology", list(FLOW_TYPES.keys()))
+selected_type = FLOW_TYPES[st.session_state.flow_method]
+hour = st.sidebar.slider("Hour (UTC)", 0, 23, value=st.session_state.hour_val)
+st.session_state.hour_val = hour 
 
-# Get the specific settings for the chosen type
-selected_type = FLOW_TYPES[flow_choice]
-
-# Execution
+# ==========================================
+# 5. RENDER
+# ==========================================
 geo_data, geo_json = load_geography(active_zones)
+full_day_df = load_full_day_data(date, selected_type)
+gen_df = load_generation_data(date, st.session_state.target_bz)
+import_mix_df = load_import_mix(date, st.session_state.target_bz, selected_type)
 
-# Load raw data for metrics
-mock_config = MockConfig(date)
-path = mock_config.output_dir / selected_type["folder"] / str(mock_config.year) / f"{target_bz}_{selected_type['folder']}.csv"
-raw_df = io.load(path, selected_type["table"], mock_config, bz=target_bz)
+if full_day_df is not None and not full_day_df.empty:
+    target_time = pd.to_datetime(f"{date} {st.session_state.hour_val:02d}:00:00").tz_localize('UTC')
+    hourly_all = full_day_df[full_day_df.index == target_time]
+    col_map, col_analysis = st.columns([65, 35], gap="large")
 
-st.subheader(f"Analysis: {target_bz} @ {date} {hour:02d}:00:00")
+    with col_map:
+        active_flows = extract_arrow_flows(st.session_state.target_bz, hourly_all, active_zones, selected_type)
+        map_event = st.plotly_chart(draw_flow_map(geo_data, geo_json, active_flows, hourly_all, st.session_state.target_bz, selected_type["type"]), width="stretch", on_select="rerun")
+        if map_event and 'selection' in map_event and map_event['selection']['points']:
+            clicked = map_event['selection']['points'][0].get('location')
+            if clicked in active_zones and clicked != st.session_state.target_bz: st.session_state.target_bz = clicked; st.rerun()
+        with st.expander(f"📊 {st.session_state.flow_method} Flow Details"):
+            if active_flows: st.dataframe(pd.DataFrame(active_flows).sort_values(by="MW", ascending=False), width="stretch", hide_index=True)
 
-if raw_df is not None and not raw_df.empty:
-    target_time = pd.to_datetime(f"{date} {hour:02d}:00:00").tz_localize('UTC')
-    
-    if target_time in raw_df.index:
-        current_row = raw_df.loc[target_time]
+    with col_analysis:
+        if selected_type["type"] == "tracing":
+            bz_cols = [c for c in full_day_df.columns if c in active_zones]
+            h_imp = full_day_df[full_day_df['bidding_zone'] == st.session_state.target_bz].groupby(level=0)[bz_cols].sum().sum(axis=1)
+            h_exp = full_day_df.groupby(level=0)[st.session_state.target_bz].sum()
+            daily_trend = (h_exp - h_imp) / 1000
+        else: daily_trend = full_day_df[full_day_df['bidding_zone'] == st.session_state.target_bz]['Net Export'] / 1000
         
-        # Calculate Metrics (assuming columns are 'target_bz_other_bz_net_export')
-        # We find all export columns related to our target zone
-        export_cols = [c for c in raw_df.columns if "_net_export" in c]
-        vals = current_row[export_cols]
+        net_val = daily_trend.loc[target_time] if target_time in daily_trend.index else 0
+        color = "#28a745" if net_val >= 0 else "#007bff"
+        st.markdown(f"<style>[data-testid='stMetricDelta'] > div {{ color: {color} !important; }}</style>", unsafe_allow_html=True)
+        st.metric(f"{st.session_state.target_bz} Net Position", f"{net_val:.2f} GW", f"{'↑' if net_val >= 0 else '↓'} Net {'Exporting' if net_val >= 0 else 'Importing'}")
         
-        # Total Exports (Sum of positive values) / 1000 for GW
-        total_exp = vals[vals > 0].sum() / 1000
-        # Total Imports (Sum of negative values) / 1000 for GW
-        total_imp = abs(vals[vals < 0].sum()) / 1000
-        # Net Balance
-        net_pos = (total_exp - total_imp)
-        
-        # --- METRIC CARDS ---
-        col1, col2, col3 = st.columns(3)
-        
-        col1.metric("Total Exports", f"{total_exp:.2f} GW")
-        col2.metric("Total Imports", f"{total_imp:.2f} GW")
-        
-        # Net Position with dynamic color (Green for surplus, Red/Blue for deficit)
-        status = "Export Surplus" if net_pos >= 0 else "Import Deficit"
-        col3.metric(
-            label="Net Position", 
-            value=f"{net_pos:.2f} GW", 
-            delta=status,
-            delta_color="normal" if net_pos >= 0 else "inverse" 
-        )
-        st.divider()
+        trend_fig = go.Figure(go.Bar(x=daily_trend.index.hour, y=daily_trend, marker_color=['#28a745' if v >= 0 else '#007bff' for v in daily_trend]))
+        trend_fig.add_vline(x=st.session_state.hour_val, line_width=2, line_dash="dash", line_color="#343a40")
+        trend_fig.update_layout(height=180, margin=dict(l=0, r=0, t=10, b=0), xaxis=dict(range=[-0.5, 23.5]), plot_bgcolor='rgba(0,0,0,0)', yaxis_title="Net Position (GW)")
+        st.plotly_chart(trend_fig, width="stretch")
 
-# --- NEW: DATA INSPECTOR ---
-with st.expander("🔍 Inspect Raw Database Data"):
-    if raw_df is None or raw_df.empty:
-        st.error(f"No data returned from DB for {target_bz}. Check if the table 'processed_physical_flows' exists.")
-    else:
-        st.write(f"Total rows retrieved for the day: {len(raw_df)}")
-        
-        # Filter for the specific hour row
-        target_time = pd.to_datetime(f"{date} {hour:02d}:00:00").tz_localize('UTC')
-        
-        if target_time in raw_df.index:
-            st.success(f"Found data for {hour:02d}:00!")
-            current_row = raw_df.loc[[target_time]]
-            
-            # Show only columns that have non-zero values to clear clutter
-            non_zero_cols = current_row.loc[:, (current_row != 0).any(axis=0)]
-            if not non_zero_cols.empty:
-                st.write("Non-zero values for this hour:")
-                st.dataframe(non_zero_cols)
-            else:
-                st.warning("All values for this specific hour are exactly 0.0.")
-        else:
-            st.warning(f"Timestamp {target_time} not found in the returned data.")
-            st.write("Available timestamps in DB (first 5):")
-            st.write(raw_df.index[:5].tolist())
+        if gen_df is not None:
+            st.caption(f"🏠 {st.session_state.target_bz} Generation Mix vs Demand")
+            cols = [c for c in gen_df.columns if c in GEN_COLORS.keys()]
+            fig = go.Figure()
+            for c in cols: fig.add_trace(go.Scatter(x=gen_df.index.hour, y=gen_df[c]/1000, name=c, mode='lines', stackgroup='one', line=dict(width=0, color=GEN_COLORS[c])))
+            # ADD TOTAL DEMAND LINE
+            if 'Demand' in gen_df.columns:
+                fig.add_trace(go.Scatter(x=gen_df.index.hour, y=gen_df['Total Load']/1000, name='Consumption', line=dict(color='#2c3e50', width=3, dash='dot')))
+            fig.add_vline(x=st.session_state.hour_val, line_width=2, line_dash="dash", line_color="white")
+            fig.update_layout(height=220, margin=dict(l=0, r=0, t=5, b=0), xaxis=dict(range=[-0.5, 23.5]), yaxis_title="GW", legend=dict(orientation="h", y=-0.5))
+            st.plotly_chart(fig, width="stretch")
 
-# --- RENDER MAP ---
-flow_data = load_real_flows(target_bz, date, hour, selected_type)
+        st.write("---")
+        if import_mix_df is not None and not import_mix_df.empty:
+            st.caption(f"🌍 Imported Energy Mix")
+            fig = go.Figure()
+            for c in [c for c in import_mix_df.columns if c in GEN_COLORS.keys()]:
+                fig.add_trace(go.Scatter(x=import_mix_df.index.hour, y=import_mix_df[c]/1000, name=c, mode='lines', stackgroup='one', line=dict(width=0, color=GEN_COLORS.get(c, "#95a5a6"))))
+            fig.add_vline(x=st.session_state.hour_val, line_width=2, line_dash="dash", line_color="white")
+            fig.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0), xaxis=dict(range=[-0.5, 23.5]), yaxis_title="GW", legend=dict(orientation="h", y=-0.5))
+            st.plotly_chart(fig, width="stretch")
+        else: st.caption(f"🌍 Imported Energy Mix (N/A)"); st.info(f"Breakdown not calculated for {st.session_state.flow_method}."); st.empty() 
 
-if not flow_data:
-    st.info("The map is empty because no neighbors with flow > 10MW were found for this hour.")
-else:
-    m = draw_flow_map(geo_data, geo_json, flow_data)
-    st.plotly_chart(m, width='stretch')
+else: st.error(f"No data for {date}")
