@@ -76,7 +76,7 @@ pip install -r requirements.txt
 
 ## 🔑 Configuration
 
-You must create a `keys.yaml` file in the **root directory** of the project to store your API key. This file is ignored by Git to keep your secrets safe.
+You must create a `keys.yaml` file in the **root directory** of the project to store your API key. 
 
 1. Create a file named `keys.yaml`.
 2. Paste the following content into it:
