@@ -19,8 +19,8 @@ Import/export results for the following methods can be calculated:
 * **ENTSO-E API Key:** Required for downloading data. Obtain a free API key by registering on the [ENTSO-E Transparency Platform](https://transparency.entsoe.eu/) and requesting "Restful API Access" in your account settings.
 * **Docker Desktop** *(Optional)*: Only required if you want to run the local TimescaleDB database and Grafana dashboard.
 * **Geospatial Libraries** *(Optional)*: For running the **Streamlit** web app (Step 4), **geopandas** requires system-level dependencies for GIS data (**GDAL, PROJ, GEOS**).
-* **Windows/Mac:** Using **Conda** is strongly recommended as it handles these dependencies automatically.
-* **Linux:** You must install system headers first: `sudo apt install libgdal-dev`.
+    * **Windows/Mac:** Using **Conda** is strongly recommended as it handles these dependencies automatically.
+    * **Linux:** You must install system headers first: `sudo apt install libgdal-dev`.
 
 
 
