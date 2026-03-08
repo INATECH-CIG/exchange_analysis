@@ -134,10 +134,13 @@ streamlit run src/app.py
 
 **Dashboard Features:**
 
-* **Methodology Comparison:** Visualises physical/commercial flows and import mixes for each bidding zone and each flow methodology for a given hour.
-* **Thermal Net Position:** Highlights the selected bidding zone and shows its net position via thermal tinting (Green for Export, Blue for Import).
-* **Generation Mix vs Demand:** Displays the internal generation mix stacked by fuel type, overlaid with a total demand line to identify import requirements.
-* **Curved Flow Mapping:** Dynamic curved arrows scaled by MW volume representing real-time exchanges.
+**Dashboard Features:**
+
+* **Methodology Comparison:** Visualises how standard commercial/physical flows and advanced flow tracing algorithms alter the perceived cross-border exchanges and imported fuel mixes for any given hour.
+* **Interactive Flow Mapping:** Dynamic, curved arrows scaled by MW volume represent real-time exchanges. The map is fully interactive—users can click any bidding zone to instantly update the dashboard focus.
+* **Net Position Tracking:** Highlights the selected bidding zone using thermal tinting (Green for Export, Blue for Import) and features an hourly trend bar chart to monitor intra-day market shifts.
+* **Generation Mix & Demand:** Displays internal generation stacked by fuel type—explicitly handling storage charging as negative generation below the zero-axis—overlaid with a total demand line to clearly identify import requirements.
+* **Import Fuel Decomposition:** Traces the specific fuel types (e.g., Wind, Nuclear, Lignite) imported from the broader European network, calculated dynamically based on the selected flow methodology.
 
 ---
 
