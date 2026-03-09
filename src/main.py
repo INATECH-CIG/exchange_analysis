@@ -40,8 +40,8 @@ def main():
     
     # 1. Execution Flags (True = Run this step)
     my_run_flags = {
-        "download": False,
-        "process": False,
+        "download": True,
+        "process": True,
         "analysis": True,
         "post_processing": True,
     }
@@ -54,7 +54,7 @@ def main():
     }
     
     # 2. Define Period (UTC)
-    period = ("2026-03-04 00:00", "2026-03-04 23:59") 
+    period = ("2026-01-01 00:00", "2026-03-06 23:59") 
 
     # 3. Define I/O Settings (Storage & Loading)
     my_io_settings = {
