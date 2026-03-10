@@ -412,7 +412,7 @@ def create_generation_chart(gen_df, target_time_local, tz_str):
     if 'Storage Charge' in gen_df.columns:
         charge_vals = -np.abs(gen_df['Storage Charge']) / 1000
         fig.add_trace(go.Scatter(
-            x=local_index, y=charge_vals, name='Storage Charge', 
+            x=local_index, y=round(charge_vals, 2), name='Storage Charge', 
             mode='lines', stackgroup='neg', 
             line=dict(width=0, color=GEN_COLORS['Storage Charge']), 
             hovertemplate="%{customdata}", customdata=np.abs(round(charge_vals, 2))
@@ -422,7 +422,7 @@ def create_generation_chart(gen_df, target_time_local, tz_str):
                 ['demand', 'total load']), None)
     if dem: 
         fig.add_trace(go.Scatter(
-            x=local_index, y=gen_df[dem]/1000, name='Demand', 
+            x=local_index, y=round(gen_df[dem]/1000, 2), name='Demand', 
             line=dict(color='#2c3e50', width=3, dash='dot')
         ))
         
