@@ -621,8 +621,8 @@ if full_day_df is not None and not full_day_df.empty:
         
         with st.expander(f"📊 {st.session_state.flow_method} Flow Details"):
             if active_flows: 
-                st.dataframe(pd.DataFrame(active_flows).sort_values(by="MW", 
-                             ascending=False), width="stretch", hide_index=True)
+                st.dataframe(round(pd.DataFrame(active_flows).sort_values(by="MW", 
+                             ascending=False), 2), width="stretch", hide_index=True)
     
     with col_analysis:
         # Context Badge
