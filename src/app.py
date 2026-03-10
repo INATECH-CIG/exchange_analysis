@@ -298,15 +298,17 @@ def draw_flow_map(geo_df, geoj, flows, target_bz, net_position_gw):
     relevant_lons = [geo_df.loc[target_bz, 'lon']]
     relevant_lats = [geo_df.loc[target_bz, 'lat']]
     
-    # Base Choropleth Layer: zmin/zmax anchors prevent color sliding
+    # Define max bound for the color scale (e.g., 5 GW)
+    max_gw = 5.0 
+    
+    # Base Choropleth Layer: Continuous scale based on net position
     fig.add_trace(go.Choropleth(
         geojson=geoj, locations=geo_df.index, 
-        z=[(1 if i == target_bz and net_position_gw >= 0 else 
-            -1 if i == target_bz else 0) for i in geo_df.index],
-        zmin=-1, zmax=1,
-        colorscale=[[0, '#e3f2fd'],    # Net Import (Soft Blue)
-                    [0.5, '#e8ecef'],  # Other Zones (Light Grey)
-                    [1, '#e8f5e9']],   # Net Export (Soft Green)
+        z=[(net_position_gw if i == target_bz else 0) for i in geo_df.index],
+        zmin=-max_gw, zmax=max_gw,
+        colorscale=[[0, "#a9cfe8"],    # Strong Import (Light Blue)
+                    [0.5, '#e8ecef'],  # Neutral / Other Zones (Light Grey)
+                    [1, "#9de4a3"]],   # Strong Export (Light Green)
         showscale=False, 
         marker_line_color=['#000000' if i == target_bz else '#adb5bd' 
                            for i in geo_df.index],
@@ -373,14 +375,14 @@ def draw_flow_map(geo_df, geoj, flows, target_bz, net_position_gw):
 # 4. CHART GENERATORS
 # ==========================================
 
-def create_trend_chart(daily_trend, target_time_local, color, tz_str):
+def create_trend_chart(daily_trend, target_time_local, tz_str):
     """Generates the 24-hour net position trend bar chart in local time."""
     local_index = daily_trend.index.tz_convert(tz_str).tz_localize(None)
     
     fig = go.Figure(go.Bar(
         x=local_index, 
-        y=daily_trend, 
-        marker_color=[color if v >= 0 else '#007bff' for v in daily_trend]
+        y=round(daily_trend, 2), 
+        marker_color=["#28a745" if v >= 0 else '#007bff' for v in daily_trend]
     ))
     
     fig.add_vline(x=target_time_local, line_width=2, line_dash="dash", line_color="#343a40")
@@ -403,7 +405,7 @@ def create_generation_chart(gen_df, target_time_local, tz_str):
     
     for c in pos_cols: 
         fig.add_trace(go.Scatter(
-            x=local_index, y=gen_df[c]/1000, name=c, mode='lines', 
+            x=local_index, y=round(gen_df[c]/1000, 2), name=c, mode='lines', 
             stackgroup='pos', line=dict(width=0, color=GEN_COLORS[c])
         ))
         
@@ -413,7 +415,7 @@ def create_generation_chart(gen_df, target_time_local, tz_str):
             x=local_index, y=charge_vals, name='Storage Charge', 
             mode='lines', stackgroup='neg', 
             line=dict(width=0, color=GEN_COLORS['Storage Charge']), 
-            hovertemplate="%{customdata} GW", customdata=np.abs(charge_vals)
+            hovertemplate="%{customdata}", customdata=np.abs(round(charge_vals, 2))
         ))
         
     dem = next((c for c in gen_df.columns if c.lower() in 
@@ -444,7 +446,7 @@ def create_import_mix_chart(import_mix_df, target_time_local, tz_str):
     
     for c in [x for x in import_mix_df.columns if x in GEN_COLORS.keys()]:
         fig.add_trace(go.Scatter(
-            x=local_index, y=import_mix_df[c]/1000, name=c, 
+            x=local_index, y=round(import_mix_df[c]/1000, 2), name=c, 
             mode='lines', stackgroup='one', 
             line=dict(width=0, color=GEN_COLORS.get(c, "#95a5a6"))
         ))
@@ -650,7 +652,7 @@ if full_day_df is not None and not full_day_df.empty:
                   f"Net {'Exporting' if net_val >= 0 else 'Importing'}")
         
         # 1. 24-hour Trend Chart
-        trend_fig = create_trend_chart(daily_trend, target_time_local, color, tz_str)
+        trend_fig = create_trend_chart(daily_trend, target_time_local, tz_str)
         st.plotly_chart(trend_fig, width="stretch", key="trend_chart")
 
         # 2. Localized Generation Chart
