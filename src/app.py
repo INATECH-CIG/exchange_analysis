@@ -17,10 +17,11 @@ import geopandas as gpd
 import plotly.graph_objects as go
 import json
 import numpy as np
+import os
 from pathlib import Path
 from entsoe.geo.utils import load_zones
 from mappings_alt import NEIGHBOURS
-from utils import io
+from utils import DataIO
 
 # ==========================================
 # 0. CONFIG & CONSTANTS
@@ -144,13 +145,32 @@ class MockConfig:
     def __init__(self, selected_date):
         self.year = selected_date.year
         self.output_dir = Path(__file__).parent.parent / "outputs_demo"
-        self.load_source, self.save_db, self.save_csv = 'csv', True, True
+        
+        # Read from environment to decide if Streamlit uses DB or CSVs
+        self.load_source = os.getenv("LOAD_SOURCE", "csv")
+        self.save_db = False   # Dashboard should never save to DB
+        self.save_csv = False  # Dashboard should never save to CSV
+        
         self.start = pd.Timestamp(selected_date).tz_localize("UTC")
         self.end = self.start + pd.Timedelta(hours=23, minutes=59, seconds=59)
 
 # ==========================================
-# 1. HELPER FUNCTIONS
+# 1. HELPER FUNCTIONS & DB INIT
 # ==========================================
+
+@st.cache_resource
+def get_data_io():
+    """
+    Initializes the DataIO handler once per session. 
+    This creates a persistent DB connection pool for the dashboard.
+    """
+    class BaseConfig:
+        load_source = os.getenv("LOAD_SOURCE", "csv")
+        save_db = False
+    return DataIO(BaseConfig())
+
+# Initialize the global I/O handler for the dashboard
+data_io = get_data_io()
 
 def get_clean_zones():
     """Excludes redundant sub-zones for a cleaner geographic UI."""
@@ -217,7 +237,7 @@ def load_full_day_data(selected_date, target_bz, flow_settings):
     """Loads hourly exchange matrices for the target zone."""
     mock_config = MockConfig(selected_date)
     path = _resolve_path(mock_config, flow_settings["flow_path"], target_bz)
-    return io.load(path, flow_settings["flow_table"], mock_config, bz=target_bz)
+    return data_io.load(path, flow_settings["flow_table"], mock_config, bz=target_bz)
 
 @st.cache_data
 def load_generation_data(selected_date, target_bz):
@@ -226,7 +246,7 @@ def load_generation_data(selected_date, target_bz):
     template = ("generation_demand_data_bidding_zones/{year}/"
                 "{bz}_generation_demand_data_bidding_zones.csv")
     path = _resolve_path(mock_config, template, target_bz)
-    return io.load(path, "processed_generation", mock_config, bz=target_bz)
+    return data_io.load(path, "processed_generation", mock_config, bz=target_bz)
 
 @st.cache_data
 def load_import_mix(selected_date, target_bz, flow_settings):
@@ -237,7 +257,7 @@ def load_import_mix(selected_date, target_bz, flow_settings):
     
     mock_config = MockConfig(selected_date)
     path = _resolve_path(mock_config, template, target_bz)
-    df = io.load(path, table_name, mock_config, bz=target_bz)
+    df = data_io.load(path, table_name, mock_config, bz=target_bz)
     
     if df is not None and not df.empty:
         rename_map = {c: c.split("_")[-1] for c in df.columns if "_" in c}
