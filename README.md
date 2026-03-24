@@ -2,7 +2,7 @@
 
 This project analyses data available through the ENTSO-E API using multiple methods (e.g. flow tracing, pooling), in order to determine the import sources and export sinks in the European electricity market on a per bidding zone and per type basis, for each bidding zone in the network.
 
-In addition to generating local CSV outputs, this project includes an **optional** fully containerised **TimescaleDB (PostgreSQL) and Grafana stack** for high-performance querying and interactive time-series visualisation, as well as an optional **Streamlit** web app for interactive visualisation.
+In addition to generating local CSV outputs, this project includes an **optional** fully containerised **TimescaleDB (PostgreSQL) and Grafana stack** for querying and interactive time-series visualisation, as well as an optional **Streamlit** web app for interactive visualisation.
 
 Import/export results for the following methods can be calculated:
 
