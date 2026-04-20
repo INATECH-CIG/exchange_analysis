@@ -71,7 +71,7 @@ class PipelineConfig:
         # DIRECTORY MAPPING
         # ==========================================
         self.project_root = PROJECT_ROOT
-        self.output_dir = self.project_root / "outputs_test"
+        self.output_dir = self.project_root / "outputs"
         self.input_dir = self.project_root / "inputs"
         
         # ==========================================
