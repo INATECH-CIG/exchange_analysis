@@ -512,7 +512,7 @@ if selected_bz != st.session_state.target_bz:
     st.session_state.target_bz = selected_bz
     st.rerun()
 
-date = st.sidebar.date_input("Day", pd.to_datetime("2026-03-04"))
+date = st.sidebar.date_input("Day", pd.to_datetime("2026-04-20"))
 
 # Compact divider
 st.sidebar.markdown(
