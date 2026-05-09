@@ -89,7 +89,7 @@ These tables contain the mathematically derived origins of imported electricity.
 ### Level 4: Category Aggregation (`*_agg`)
 | Table / Suffix | Origin Methodology | Description, Transformation & Calculation Logic |
 | :--- | :--- | :--- |
-| **`*_agg`** (e.g., `Renewable`) | `*_type` | **Macro Mapping:** Sums highly specific ENTSO-E technology flows (e.g., `Wind Onshore`, `Solar`, `Hydro Run-of-river`) into broader macro-categories defined by the pipeline's internal `agg_map`. |
+| **`*_agg`** (e.g., `Renewable`) | `*_type` | **Macro Mapping:** Sums highly specific ENTSO-E technology flows (e.g., `Hydro Run-of-river`) into broader macro-categories defined by the pipeline's internal `agg_map`. |
 | **`bidding_zone`** | Pipeline IO | Denotes the bidding zone the row's data pertains to. |
 | **`source_download_date`**| Pipeline IO | Synchronized global vintage date (`YYYY-MM-DD`). |
 
