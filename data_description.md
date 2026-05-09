@@ -40,7 +40,7 @@ These tables represent the "Clean Data Layer." The origin for all data here is t
 ### `processed_generation`
 | Column / Field | Origin | Description, Transformation & Calculation Logic |
 | :--- | :--- | :--- |
-| **`[Generation Type]`** | `raw_generation` | **1.** Resampled to 1-hour means. **2.** Temporal gaps are imputed using heuristics like `LINEAR` interpolation, `FORWARD_FILL`, or `WEEK_BEFORE` mirroring. **3.** Any negative values (representing parasitic load of the power plants) are mathematically clipped to `0.0` to preserve arithmetic integrity when calculating generation mix fractions later. |
+| **`[Generation Type]`** | `raw_generation` | **1.** Resampled to 1-hour means. **2.** Temporal gaps are imputed using heuristics like `LINEAR` interpolation, `FORWARD_FILL`, or `WEEK_BEFORE` mirroring. **3.** Any negative values (representing parasitic load of the power plants) are mathematically clipped to `0.0` (excluding `"Hydro Pumped Storage"` and `"Energy storage"`) to preserve arithmetic integrity when calculating generation mix fractions later. |
 | **`Storage Charge`** | `raw_generation` | **Calculated:** The absolute sum of all strictly *negative* values isolated from the `"Hydro Pumped Storage"` and `"Energy storage"` columns. This represents power being actively pulled from the grid to charge storage assets. |
 | **`Storage Discharge`** | `raw_generation` | **Calculated:** The sum of all strictly *positive* values isolated from the `"Hydro Pumped Storage"` and `"Energy storage"` columns. This represents power injected back into the grid. |
 | **`Generation`** | Internal | **Calculated:** The sum of all active physical generation components at a given timestep (strictly excluding the aforementioned storage columns). |
