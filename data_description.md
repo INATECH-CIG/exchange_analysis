@@ -14,7 +14,7 @@ These tables contain the direct, unpatched arrays retrieved from external APIs. 
 | :--- | :--- | :--- |
 | **`[Generation Type]`** | ENTSO-E API / BMRS (for GB) | Extracted directly from the source API. For the GB bidding zone, queries are routed to the Elexon BMRS API, where 30-minute JSON arrays are parsed, grouped by `psrType`, and sorted to form a continuous array. Other zones use the ENTSO-E Pandas client. |
 | **`Actual Load` / `Load`**| ENTSO-E API / BMRS (for GB) | Raw electrical consumption in MW extracted directly from the source APIs. |
-| **`bidding_zone`** | Pipeline IO | Injected automatically by the `DataIO` class. Represents the target geographic zone (e.g., `DE_LU`, `FR`). |
+| **`bidding_zone`** | Pipeline IO | Denotes the bidding zone the row's data pertains to (e.g., `DE_LU`, `FR`). |
 | **`download_timestamp`** | Pipeline IO | The exact UTC datetime of the API extraction execution (Format: `YYYY-MM-DD HH:MM:SS UTC`). Used to track data freshness. |
 
 ### `raw_commercial_flows` / `raw_commercial_flows_da` / `raw_physical_flows`
@@ -22,14 +22,14 @@ These tables contain the direct, unpatched arrays retrieved from external APIs. 
 | :--- | :--- | :--- |
 | **`[bz]_[n]`** | ENTSO-E API | Outward scheduled or physical flow queried using `country_code_from=[Target Zone]` and `country_code_to=[Neighbor]`. |
 | **`[n]_[bz]`** | ENTSO-E API | Inward scheduled or physical flow queried using `country_code_from=[Neighbor]` and `country_code_to=[Target Zone]`. |
-| **`bidding_zone`** | Pipeline IO | Injected automatically by the `DataIO` class. |
+| **`bidding_zone`** | Pipeline IO | Denotes the bidding zone the row's data pertains to. |
 | **`download_timestamp`** | Pipeline IO | The exact UTC datetime of the API extraction. |
 
 ### `raw_market_price_dayahead` / `raw_net_positions_dayahead`
 | Column / Field | Origin Data Source | Description, Transformation & Extraction Logic |
 | :--- | :--- | :--- |
 | **`Value`** | ENTSO-E API | Queried directly. **Transformation:** For Italian (`IT`) bidding zones in the year 2025, Net Positions are multiplied by `-1`. This mathematically corrects a systemic sign convention inconsistency found within the ENTSO-E transparency platform for that specific year. The raw data is then resampled to 1-hour averages. |
-| **`bidding_zone`** | Pipeline IO | Injected automatically by the `DataIO` class. |
+| **`bidding_zone`** | Pipeline IO | Denotes the bidding zone the row's data pertains to. |
 | **`download_timestamp`** | Pipeline IO | The exact UTC datetime of the API extraction. |
 
 ---
@@ -49,7 +49,7 @@ These tables represent the "Clean Data Layer." The origin for all data here is t
 | **`Total Load`** | Internal | **Calculated:** `Demand` + `Storage Charge`. The total physical power consumed within the zone. |
 | **`Net Export`** | Internal | **Calculated:** `Total Generation` - `Total Load`. The structural net border position. Positive values indicate the zone is a Net Exporter; negative values indicate a Net Importer. |
 | **`gap_filling_method`**| Pipeline Logic | A metadata audit string that tracks the exact gap-filling algorithms applied to specific timestamps (e.g., `[Nuclear] LINEAR`). Appends `CLIPPED_NEGATIVE` if the non-negativity constraint was triggered. |
-| **`bidding_zone`** | Pipeline IO | Injected automatically by the `DataIO` class. |
+| **`bidding_zone`** | Pipeline IO | Denotes the bidding zone the row's data pertains to. |
 | **`source_download_date`**| Pipeline IO | A synchronized global vintage date (`YYYY-MM-DD`). This ensures that downstream analysis always references a globally consistent snapshot, preventing vintage mismatches between zones. |
 
 ### `processed_commercial_flows` / `processed_physical_flows`
@@ -59,7 +59,7 @@ These tables represent the "Clean Data Layer." The origin for all data here is t
 | **`[bz]_[n]_net_export`** | Internal | **Calculated:** The cleaned `[bz]_[n]` array minus the cleaned `[n]_[bz]` array. The net scheduled or physical flow on that specific border. |
 | **`Net Export`** | Internal | **Calculated:** The sum of all individual `[bz]_[n]_net_export` columns. This represents the total border balance and is strictly recalculated after all patches to preserve arithmetic closure. |
 | **`gap_filling_method`**| Pipeline Logic | Audit string tracking imputation and symmetry conflict resolutions. |
-| **`bidding_zone`** | Pipeline IO | Injected automatically by the `DataIO` class. |
+| **`bidding_zone`** | Pipeline IO | Denotes the bidding zone the row's data pertains to. |
 | **`source_download_date`**| Pipeline IO | Synchronized global vintage date (`YYYY-MM-DD`). |
 
 ---
@@ -75,7 +75,7 @@ These tables contain the mathematically derived origins of imported electricity.
 | **`tracing_agg_coupling_bz`** | `processed_physical_flows` & `processed_generation` | **Matrix Inversion (Aggregated):** Constructs a characteristic topology matrix $A$, but relies exclusively on the nodal net-export vector $P_{in}$ (ignoring internal absolute load/generation). Calculates the tracing matrix via $q = A^{-1} \cdot P_{in}$. |
 | **`pool_physical_net_pos_bz`** | `processed_physical_flows` | **Copper Plate Pooling:** Apportions a zone's total imports proportionally based on the system-wide aggregated pool of net exporters, completely ignoring exact grid topology and line routing. |
 | **`gap_filling_method`**| Pipeline Logic | Exists if singularities or intractable matrices required fallback allocations. |
-| **`bidding_zone`** | Pipeline IO | Injected automatically by the `DataIO` class. |
+| **`bidding_zone`** | Pipeline IO | Denotes the bidding zone the row's data pertains to. |
 | **`source_download_date`**| Pipeline IO | Synchronized global vintage date (`YYYY-MM-DD`). |
 
 ### Level 2 & 3: Granular & Technology Aggregation (`*_type_bz`, `*_type`)
@@ -83,14 +83,14 @@ These tables contain the mathematically derived origins of imported electricity.
 | :--- | :--- | :--- |
 | **`*_type_bz`** (e.g., `FR_Nuclear`) | Level 1 Data + `processed_generation` | **Granular Decomposition:** The hourly MW volume imported from source zone `n` (calculated in Level 1 via tracing or pooling) is multiplied by zone `n`'s internal generation mix fraction for that specific `[Type]` at that exact hour. |
 | **`*_type`** (e.g., `Nuclear`) | `*_type_bz` | **Technology Aggregation:** Sums all incoming decomposed flows of a specific technology type across *all* traced/pooled source zones into a single column (e.g., combining `FR_Nuclear` + `BE_Nuclear`). |
-| **`bidding_zone`** | Pipeline IO | Injected automatically by the `DataIO` class. |
+| **`bidding_zone`** | Pipeline IO | Denotes the bidding zone the row's data pertains to. |
 | **`source_download_date`**| Pipeline IO | Synchronized global vintage date (`YYYY-MM-DD`). |
 
 ### Level 4: Category Aggregation (`*_agg`)
 | Table / Suffix | Origin Methodology | Description, Transformation & Calculation Logic |
 | :--- | :--- | :--- |
 | **`*_agg`** (e.g., `Renewable`) | `*_type` | **Macro Mapping:** Sums highly specific ENTSO-E technology flows (e.g., `Wind Onshore`, `Solar`, `Hydro Run-of-river`) into broader macro-categories defined by the pipeline's internal `agg_map`. |
-| **`bidding_zone`** | Pipeline IO | Injected automatically by the `DataIO` class. |
+| **`bidding_zone`** | Pipeline IO | Denotes the bidding zone the row's data pertains to. |
 | **`source_download_date`**| Pipeline IO | Synchronized global vintage date (`YYYY-MM-DD`). |
 
 ---
@@ -102,5 +102,5 @@ These tables execute a final aggregation of the high-granularity MW arrays into 
 | :--- | :--- | :--- |
 | **Rows (Index)** | All Level 3 Analysis Tables | Represents the specific Bidding Zone (`FR`), Technology Type (`Nuclear`), or Category (`Renewable`), depending on the chosen output file. |
 | **Columns (Values)**| All Level 3 Analysis Tables | Represents the applied tracking methodology (e.g., `CFT`, `Netted CFT`, `Pooled Net CFT`, `Pooled Net Phys.`, `DC Flow Tracing`, `AC Flow Tracing`). **Transformation:** The 8,760 individual hourly MW rows for the year are summed, and then divided by `1,000,000` (`1e6`) to mathematically convert the absolute value into Terawatt-hours (TWh). |
-| **`bidding_zone`** | Pipeline IO | Injected automatically by the `DataIO` class after dataframe transposition. |
+| **`bidding_zone`** | Pipeline IO | Denotes the bidding zone the row's data pertains to. |
 | **`source_download_date`**| Pipeline IO | Synchronized global vintage date (`YYYY-MM-DD`), tracing a continuous lineage back to the raw extraction batch. |
