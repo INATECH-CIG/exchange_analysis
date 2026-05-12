@@ -60,18 +60,25 @@ class PipelineConfig:
     def __init__(
         self, 
         date_range: Tuple[str, str],
-        key_file: str = "keys.yaml", 
+        resolution: str = "bidding_zone",
         run_flags: Optional[Dict[str, bool]] = None,
         target_zones: Optional[List[str]] = None,
         data_types: Optional[Dict[str, bool]] = None,
         io_settings: Optional[Dict[str, Any]] = None,
         analysis_flags: Optional[Dict[str, bool]] = None
     ):
+        
+        self.resolution = resolution
+
+        # Create a dynamic suffix for files/folders (e.g., '_bidding_zones' or '_countries')
+        self.res_suffix = "countries" if resolution == "country" else f"{resolution}s"
+        res_folder_name = "countries" if resolution == "country" else f"{resolution}s"
+
         # ==========================================
         # DIRECTORY MAPPING
         # ==========================================
         self.project_root = PROJECT_ROOT
-        self.output_dir = self.project_root / "outputs"
+        self.output_dir = PROJECT_ROOT / "outputs" / res_folder_name
         self.input_dir = self.project_root / "inputs"
         
         # ==========================================
@@ -123,6 +130,7 @@ class PipelineConfig:
             self.save_csv = io_settings.get("save_csv", self.save_csv)
             self.save_db = io_settings.get("save_db", self.save_db)
             self.load_source = io_settings.get("load_source", self.load_source)
+            self.use_timescale = io_settings.get("use_timescale", False)
 
         # ==========================================
         # API DOWNLOAD FILTERS
@@ -145,14 +153,25 @@ class PipelineConfig:
             
         with open(yaml_path, 'r') as f:
             topology_data = yaml.safe_load(f)
-            raw_neighbours = topology_data.get('neighbours', {})
-            self.hvdc_borders = topology_data.get('hvdc_borders', [])
-            self.valid_zero_zones = topology_data.get('valid_zero_zones', [])
-            zones_to_remove = topology_data.get('zones_to_remove', [])
 
-        # Filter topological map strictly through dictionary comprehension
+            self.country_to_zones = topology_data.get('country_to_zones', {})
+            
+            # Extract the correct block based on resolution
+            res_data = topology_data.get('resolutions', {}).get(self.resolution, {})
+            if not res_data:
+                raise ValueError(f"Resolution '{self.resolution}' not defined in config.yaml")
+                
+            raw_neighbours = res_data.get('neighbours', {})
+            self.hvdc_borders = res_data.get('hvdc_borders', [])
+            self.valid_zero_zones = res_data.get('valid_zero_zones', [])
+            zones_to_remove = res_data.get('zones_to_remove', [])
+
+        # Extract keys first
+        all_keys = raw_neighbours.keys()
+
+        # Filter: Remove excluded zones AND remove neighbors that aren't keys
         self.neighbours_map = {
-            k: [v for v in neighbors if v not in zones_to_remove] 
+            k: [v for v in neighbors if v not in zones_to_remove and v in all_keys] 
             for k, neighbors in raw_neighbours.items() 
             if k not in zones_to_remove
         }

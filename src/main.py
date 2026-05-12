@@ -38,6 +38,9 @@ def main():
     # ==========================================
     # CONTROL PANEL
     # ==========================================
+
+    # Choose 'bidding_zone' or 'country'
+    my_resolution = "country"
     
     # 1. Execution Flags (True = Run this step)
     my_run_flags = {
@@ -55,13 +58,14 @@ def main():
     }
     
     # 2. Define Period (UTC)
-    period = ("2026-01-01 00:00", "2026-01-31 23:59") 
+    period = ("2025-01-01 00:00", "2025-12-31 23:59") 
 
     # 3. Define I/O Settings (Storage & Loading)
     my_io_settings = {
         "save_csv": True,      # Save outputs locally as CSVs
-        "save_db": False,        # Push outputs to the TimescaleDB server
-        "load_source": "csv"     # 'csv' or 'db'
+        "save_db": True,        # Push outputs to the TimescaleDB server
+        "load_source": "db",     # 'csv' or 'db'
+        "use_timescale": True    # Use TimescaleDB for time-series data
     }
 
     # 4. Optional: Download only Subsets of Data
@@ -80,6 +84,7 @@ def main():
     # 5. Initialize Config
     config = PipelineConfig(
         date_range=period,
+        resolution=my_resolution,
         run_flags=my_run_flags,
         io_settings=my_io_settings,
         analysis_flags=analysis_subset,

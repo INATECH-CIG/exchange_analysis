@@ -13,10 +13,10 @@ and standardize raw generation, demand, and cross-border flow data.
 import pandas as pd
 import requests
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, Union
 from entsoe import EntsoePandasClient
 from config import PipelineConfig
 from utils import DataIO, safe_query, fill_gaps_wrapper, correct_zero_values, _merge_gap_methods
@@ -39,7 +39,7 @@ def download_generation_demand(client: EntsoePandasClient, config: PipelineConfi
     Routes GB queries to the BMRS API and all others to the ENTSO-E client.
     """
     if not config.data_types["generation"]: return
-    raw_dir = config.get_output_path("generation_demand_data_bidding_zones") / "raw"
+    raw_dir = config.get_output_path("generation_demand_data") / "raw"
     
     for bz in config.target_zones:
         logger.info(f"[Download] Gen/Demand for {bz}...")
@@ -66,9 +66,9 @@ def process_generation_demand(config: PipelineConfig, io: DataIO) -> Dict[str, p
     Enforces gap-filling heuristics and recalculates structural net exports.
     Operates in two phases to guarantee a globally synchronized data vintage.
     """
-    raw_dir = config.get_output_path("generation_demand_data_bidding_zones") / "raw"
-    out_dir = config.get_output_path("generation_demand_data_bidding_zones")
-    gaps_dir = config.get_gaps_path("generation_demand_data_bidding_zones")
+    raw_dir = config.get_output_path("generation_demand_data") / "raw"
+    out_dir = config.get_output_path("generation_demand_data")
+    gaps_dir = config.get_gaps_path("generation_demand_data")
     
     gen_storage_dict: Dict[str, pd.DataFrame] = {}
     vintages = []
@@ -95,7 +95,7 @@ def process_generation_demand(config: PipelineConfig, io: DataIO) -> Dict[str, p
                 elif path.exists():
                     vintages.append(datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d'))
                 else:
-                    vintages.append(pd.Timestamp.utcnow().strftime('%Y-%m-%d'))
+                    vintages.append(pd.Timestamp.now(timezone.utc).strftime('%Y-%m-%d'))
 
         extract_vintage(gen_df, gen_path)
         extract_vintage(load_df, load_path)
@@ -191,13 +191,54 @@ def process_generation_demand(config: PipelineConfig, io: DataIO) -> Dict[str, p
 
     # Commit synchronized dataframes to designated IO channels
     for bz, final_df in gen_storage_dict.items():
-        io.save(final_df, out_dir / f"{bz}_generation_demand_data_bidding_zones.csv", "processed_generation", config, bz=bz)
+        io.save(final_df, out_dir / f"{bz}_generation_demand_data.csv", "processed_generation", config, bz=bz)
 
     return gen_storage_dict
 
 # ==========================================
 # FLOWS
 # ==========================================
+def smart_fetch_flows(client: EntsoePandasClient, config: PipelineConfig, code_from: str, code_to: str, flow_type: str, dayahead: bool = False) -> Optional[pd.Series]:
+    """Attempts direct API fetch; if it fails, falls back to aggregating constituent zones."""
+    
+    df = safe_query(
+        client.query_scheduled_exchanges if flow_type == "commercial" else client.query_crossborder_flows,
+        context=f"{code_from}->{code_to}",
+        country_code_from=code_from, country_code_to=code_to, 
+        start=config.start, end=config.end, dayahead=dayahead
+    )
+    
+    if df is not None:
+        return df
+
+    # --- 2. If Direct Fetch Fails, attempt Zone Rollup ---
+    logger.info(f"    -> Direct fetch failed for {code_from}->{code_to}. Attempting constituent zone rollup...")
+    
+    zones_from = getattr(config, 'country_to_zones', {}).get(code_from, [code_from])
+    zones_to = getattr(config, 'country_to_zones', {}).get(code_to, [code_to])
+    
+    aggregated_df = None
+    
+    for z_from in zones_from:
+        for z_to in zones_to:
+            zonal_df = safe_query(
+                client.query_scheduled_exchanges if flow_type == "commercial" else client.query_crossborder_flows,
+                context=f"Rollup {z_from}->{z_to}",
+                country_code_from=z_from, country_code_to=z_to, 
+                start=config.start, end=config.end, dayahead=dayahead
+            )
+            
+            if zonal_df is not None and not zonal_df.empty:
+                if aggregated_df is None:
+                    aggregated_df = zonal_df.copy()
+                else:
+                    aggregated_df = aggregated_df.add(zonal_df, fill_value=0)
+                    
+    if aggregated_df is not None:
+        logger.info(f"    -> Successfully rolled up zones for {code_from}->{code_to}.")
+        
+    return aggregated_df
+
 def download_flows(client: EntsoePandasClient, config: PipelineConfig, io: DataIO, flow_type: str = "commercial", dayahead: bool = False) -> None:
     """
     Downloads scheduled commercial or physical cross-border exchanges.
@@ -206,7 +247,7 @@ def download_flows(client: EntsoePandasClient, config: PipelineConfig, io: DataI
     if flow_type == "commercial" and not config.data_types.get(f"flows_commercial{'_dayahead' if dayahead else '_total'}"): return
     if flow_type == "physical" and not config.data_types.get("flows_physical"): return
 
-    folder = "physical_flow_data_bidding_zones" if flow_type == "physical" else f"comm_flow_{'dayahead' if dayahead else 'total'}_bidding_zones"
+    folder = "physical_flow_data" if flow_type == "physical" else f"comm_flow_{'dayahead' if dayahead else 'total'}"
     raw_dir = config.get_output_path(folder) / "raw"
 
     for bz in config.target_zones:
@@ -214,12 +255,8 @@ def download_flows(client: EntsoePandasClient, config: PipelineConfig, io: DataI
 
         flow_df: Optional[pd.DataFrame] = None
         for n in [z for z in config.neighbours_map[bz] if z in config.zones]:
-            if flow_type == "commercial":
-                f_out = safe_query(client.query_scheduled_exchanges, context=f"{bz}->{n}", country_code_from=bz, country_code_to=n, start=config.start, end=config.end, dayahead=dayahead)
-                f_in = safe_query(client.query_scheduled_exchanges, context=f"{n}->{bz}", country_code_from=n, country_code_to=bz, start=config.start, end=config.end, dayahead=dayahead)
-            else:
-                f_out = safe_query(client.query_crossborder_flows, context=f"{bz}->{n}", country_code_from=bz, country_code_to=n, start=config.start, end=config.end)
-                f_in = safe_query(client.query_crossborder_flows, context=f"{n}->{bz}", country_code_from=n, country_code_to=bz, start=config.start, end=config.end)
+            f_out = smart_fetch_flows(client, config, code_from=bz, code_to=n, flow_type=flow_type, dayahead=dayahead)
+            f_in = smart_fetch_flows(client, config, code_from=n, code_to=bz, flow_type=flow_type, dayahead=dayahead)
 
             if f_out is not None: flow_df = pd.concat([flow_df, f_out.loc[~f_out.index.duplicated()].to_frame(name=f"{bz}_{n}")], axis=1)
             if f_in is not None: flow_df = pd.concat([flow_df, f_in.loc[~f_in.index.duplicated()].to_frame(name=f"{n}_{bz}")], axis=1)
@@ -233,7 +270,7 @@ def process_flows(config: PipelineConfig, io: DataIO, flow_type: str = "commerci
     Standardizes bilateral flow matrices, applies gap imputation, and evaluates zero-flow legitimacy.
     Operates in two phases to guarantee a globally synchronized data vintage.
     """
-    folder = "physical_flow_data_bidding_zones" if flow_type == "physical" else f"comm_flow_{'dayahead' if dayahead else 'total'}_bidding_zones"
+    folder = "physical_flow_data" if flow_type == "physical" else f"comm_flow_{'dayahead' if dayahead else 'total'}"
     raw_dir, out_dir, gaps_dir = config.get_output_path(folder) / "raw", config.get_output_path(folder), config.get_gaps_path(folder)
     
     flow_dict: Dict[str, pd.DataFrame] = {}
@@ -257,7 +294,7 @@ def process_flows(config: PipelineConfig, io: DataIO, flow_type: str = "commerci
             elif flow_path and flow_path.exists():
                 v = datetime.fromtimestamp(flow_path.stat().st_mtime).strftime('%Y-%m-%d')
             else:
-                v = pd.Timestamp.utcnow().strftime('%Y-%m-%d')
+                v = pd.Timestamp.now(timezone.utc).strftime('%Y-%m-%d')
             
             vintages.append(v)
         else:
@@ -311,7 +348,7 @@ def process_flows(config: PipelineConfig, io: DataIO, flow_type: str = "commerci
 
     # Commit synchronized dataframes to designated IO channels
     for bz, final_df in flow_dict.items():
-        filename = f"{bz}_comm_flow_{'dayahead' if dayahead else 'total'}_bidding_zones.csv" if flow_type == "commercial" else f"{bz}_physical_flow_data_bidding_zones.csv"
+        filename = f"{bz}_comm_flow_{'dayahead' if dayahead else 'total'}.csv" if flow_type == "commercial" else f"{bz}_physical_flow_data.csv"
         processed_table = f"processed_{flow_type}_flows" + ("_da" if dayahead else "")
         
         io.save(final_df, out_dir / filename, processed_table, config, bz=bz)
@@ -324,7 +361,7 @@ def balance_flows_symmetry(data_dict: Dict[str, pd.DataFrame], config: PipelineC
     Resolves reporting conflicts between neighboring zones using an availability-based reliability index.
     """
     logger.info(f"[Balance] Ensuring symmetry for {flow_type} flows...")
-    folder = "physical_flow_data_bidding_zones" if flow_type == "physical" else f"comm_flow_{'dayahead' if dayahead else 'total'}_bidding_zones"
+    folder = "physical_flow_data" if flow_type == "physical" else f"comm_flow_{'dayahead' if dayahead else 'total'}"
     gaps_dir, out_dir = config.get_gaps_path(folder), config.get_output_path(folder)
 
     for bz in data_dict:

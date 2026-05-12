@@ -16,6 +16,7 @@ import pandas as pd
 import numpy as np
 import sys
 import logging
+from datetime import timezone
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple, Any, Callable, Union
 from sqlalchemy import text, inspect
@@ -72,12 +73,35 @@ class DataIO:
     def __init__(self, config: Any) -> None:
         self.save_db = getattr(config, 'save_db', False)
         self.load_source = getattr(config, 'load_source', 'csv')
+        self.use_timescale = getattr(config, 'use_timescale', False)
 
         if self.save_db or self.load_source == 'db':
             self.engine = get_db_engine()
         else:
             self.engine = None
             logger.info("[IO] Running in CSV-only mode. No database engine initialized.")
+
+    def _create_hypertable(self, table_name: str, time_col: str = "index") -> None:
+        """Creates a TimescaleDB hypertable for time-series data with automatic chunking."""
+        if not self.use_timescale or not self.engine:
+            return
+
+        try:
+            with self.engine.begin() as conn:
+                # Check if table exists and isn't already a hypertable
+                check_query = text(f"SELECT is_hypertable('{table_name}'::regclass)")
+                result = conn.execute(check_query).scalar()
+
+                if result is False:
+                    create_query = text(f"""
+                        SELECT create_hypertable('{table_name}', '{time_col}',
+                            if_not_exists => TRUE,
+                            chunk_time_interval => INTERVAL '1 week')
+                    """)
+                    conn.execute(create_query)
+                    logger.info(f"[Timescale] Created hypertable for {table_name}")
+        except Exception as e:
+            logger.debug(f"[Timescale] Could not create hypertable for {table_name}: {e}")
 
     def save(self, df: Optional[Union[pd.DataFrame, pd.Series]], filepath: Path, table_name: str, config: Any, bz: Optional[str] = None) -> None:
         """Persists structural arrays to defined storage mediums, handling schema evolution."""
@@ -92,11 +116,11 @@ class DataIO:
         is_result_table = table_name.startswith(("analysis_", "tracing_", "pool_", "annual_", "processed_"))
         
         if is_result_table:
-            date_val = getattr(config, 'analysis_source_date', pd.Timestamp.utcnow().strftime('%Y-%m-%d'))
+            date_val = getattr(config, 'analysis_source_date', pd.Timestamp.now(timezone.utc).strftime('%Y-%m-%d'))
             df_out["source_download_date"] = date_val
             meta_cols = ["gap_filling_method", "bidding_zone", "source_download_date"]
         else:
-            df_out["download_timestamp"] = pd.Timestamp.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
+            df_out["download_timestamp"] = pd.Timestamp.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
             meta_cols = ["gap_filling_method", "bidding_zone", "download_timestamp"]
 
         # Enforce column order to maintain tabular consistency
@@ -111,13 +135,25 @@ class DataIO:
 
         # 2. Execute relational database persistence
         if getattr(config, 'save_db', True):
-            clean_table = table_name.lower().replace("-", "_").replace(" ", "_")[:63]
+            raw_table = table_name.lower().replace("-", "_").replace(" ", "_")
+            # Automatically append the resolution suffix to the SQL table name
+            if not raw_table.endswith(config.res_suffix):
+                raw_table = f"{raw_table}_{config.res_suffix}"
+
+            # PostgreSQL enforces a strict 63-character limit on table names
+            clean_table = raw_table[:63]
+
+            # For time-series tables, use standard "time" column name for TimescaleDB
+            is_timeseries = isinstance(df.index, pd.DatetimeIndex) and not table_name.startswith("annual_")
+            if is_timeseries:
+                df_out.index.name = "time"
+                df_out = df_out.reset_index()
 
             if bz is not None:
                 if isinstance(df.index, pd.DatetimeIndex):
                     min_time = df.index.min().strftime('%Y-%m-%d %H:%M:%S%z')
                     max_time = df.index.max().strftime('%Y-%m-%d %H:%M:%S%z')
-                    index_col = df.index.name or 'index'
+                    index_col = "time" if is_timeseries else (df.index.name or 'index')
 
                     delete_query = text(f"""
                         DELETE FROM {clean_table}
@@ -135,25 +171,47 @@ class DataIO:
                     try:
                         conn.execute(delete_query)
                     except Exception:
-                        pass 
+                        pass
 
             # Evaluate and apply dynamic schema evolution
             try:
                 inspector = inspect(self.engine)
                 if inspector.has_table(clean_table):
-                    existing_cols = [col['name'] for col in inspector.get_columns(clean_table)]
-                    new_cols = [c for c in df_out.columns if c not in existing_cols]
+                    existing_cols = {col['name']: col['type'] for col in inspector.get_columns(clean_table)}
 
-                    if new_cols:
-                        with self.engine.begin() as conn:
-                            for c in new_cols:
-                                col_type = "TEXT" if c in meta_cols else "DOUBLE PRECISION"
-                                conn.execute(text(f'ALTER TABLE {clean_table} ADD COLUMN "{c}" {col_type}'))
+                    # Check if time column has wrong type (from old schema)
+                    if "time" in existing_cols and is_timeseries:
+                        col_type_str = str(existing_cols["time"])
+                        if "double" in col_type_str.lower() or "numeric" in col_type_str.lower():
+                            logger.warning(f"[DB Schema] Dropping {clean_table} to recreate with correct 'time' column type (TIMESTAMP)")
+                            with self.engine.begin() as conn:
+                                conn.execute(text(f'DROP TABLE IF EXISTS {clean_table} CASCADE'))
+                            inspector = inspect(self.engine)
+
+                    # Add missing columns if table still exists
+                    if inspector.has_table(clean_table):
+                        existing_cols = {col['name'] for col in inspector.get_columns(clean_table)}
+                        new_cols = [c for c in df_out.columns if c not in existing_cols]
+
+                        if new_cols:
+                            with self.engine.begin() as conn:
+                                for c in new_cols:
+                                    if c == "time":
+                                        col_type = "TIMESTAMP WITH TIME ZONE"
+                                    elif c in meta_cols:
+                                        col_type = "TEXT"
+                                    else:
+                                        col_type = "DOUBLE PRECISION"
+                                    conn.execute(text(f'ALTER TABLE {clean_table} ADD COLUMN "{c}" {col_type}'))
             except Exception as e:
                 logger.warning(f"[DB Schema Warning] Could not auto-evolve schema for {clean_table}: {e}")
 
             try:
-                df_out.to_sql(clean_table, self.engine, if_exists="append")
+                df_out.to_sql(clean_table, self.engine, if_exists="append", index=False)
+
+                # Create hypertable for time-series data
+                if is_timeseries:
+                    self._create_hypertable(clean_table, "time")
             except Exception as e:
                 logger.error(f"[DB Error] Failed to save {clean_table} to database: {e}")
 
@@ -164,17 +222,23 @@ class DataIO:
         end_str = config.end.strftime('%Y-%m-%d %H:%M:%S%z')
 
         if source == 'db':
-            clean_table = table_name.lower().replace("-", "_").replace(" ", "_")[:63]
+            raw_table = table_name.lower().replace("-", "_").replace(" ", "_")
+            if not raw_table.endswith(config.res_suffix):
+                raw_table = f"{raw_table}_{config.res_suffix}"
+            clean_table = raw_table[:63]
             try:
-                base_query = f'SELECT * FROM {clean_table} WHERE "index" >= \'{start_str}\' AND "index" <= \'{end_str}\''
+                # Use "time" column for time-series tables, "index" for others
+                time_col = '"time"' if not table_name.startswith("annual_") else '"index"'
+                base_query = f'SELECT * FROM {clean_table} WHERE {time_col} >= \'{start_str}\' AND {time_col} <= \'{end_str}\''
                 query = f"{base_query} AND bidding_zone = '{bz}'" if bz is not None else base_query
 
                 df = pd.read_sql(text(query), self.engine)
                 if df.empty:
                     raise ValueError(f"No data found in DB for {clean_table} (bz={bz})")
 
-                index_col = str(df.columns[0])
-                df.set_index(index_col, inplace=True)
+                # Set time column as index
+                time_col_name = "time" if "time" in df.columns else str(df.columns[0])
+                df.set_index(time_col_name, inplace=True)
                 df.index = pd.to_datetime(df.index, utc=True)
                 df.index.name = None
 
