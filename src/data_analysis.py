@@ -578,6 +578,10 @@ def perform_post_processing_aggregation(config: PipelineConfig, io: DataIO) -> N
     def load_clean(io: DataIO, path: Any, table_prefix: str, bz: str, drop: Optional[str] = None) -> Optional[pd.DataFrame]:
         df = io.load(path, table_prefix, config, bz=bz)
         if df is None: return None
+        meta_cols = ["bidding_zone", "source_download_date"]
+        cols_to_drop = [c for c in meta_cols if c in df.columns]
+        if cols_to_drop:
+            df = df.drop(columns=cols_to_drop)
         df = df.loc[:, ~df.columns.duplicated()].apply(pd.to_numeric, errors='coerce').fillna(0.0)
         if drop and drop in df.columns: df = df.drop(columns=[drop])
         return df
@@ -658,10 +662,16 @@ def perform_post_processing_aggregation(config: PipelineConfig, io: DataIO) -> N
         res_imp_type = res_imp_type.apply(pd.to_numeric, errors='coerce').fillna(0.0) / 1e6
         res_exp_type = res_exp_type.apply(pd.to_numeric, errors='coerce').fillna(0.0) / 1e6
         
-        io.save(res_imp_bz.T, sub_outs["imp_bz"] / f"{bz}_annual_totals_import_per_bidding_zone_{year}.csv", "annual_imp_bz", config, bz=bz)
-        io.save(res_exp_bz.T, sub_outs["exp_bz"] / f"{bz}_annual_totals_export_per_bidding_zone_{year}.csv", "annual_exp_bz", config, bz=bz)
-        io.save(res_imp_type.T, sub_outs["imp_type"] / f"{bz}_annual_totals_import_per_type_{year}.csv", "annual_imp_type", config, bz=bz)
-        io.save(res_exp_type.T, sub_outs["exp_type"] / f"{bz}_annual_totals_export_per_type_{year}.csv", "annual_exp_type", config, bz=bz)
+        if bz=="DE_LU":
+            print(f"\nAnnual Totals for {bz} (TWh):")
+            print("Import BZ:", res_imp_bz.T.sum())
+            print("Export BZ:", res_exp_bz.T.sum())
+            print("Net Export BZ:", (res_exp_bz - res_imp_bz).T.sum())
+
+        io.save(res_imp_bz.T.rename_axis("Bidding Zone"), sub_outs["imp_bz"] / f"{bz}_annual_totals_import_per_bidding_zone_{year}.csv", "annual_imp_bz", config, bz=bz)
+        io.save(res_exp_bz.T.rename_axis("Bidding Zone"), sub_outs["exp_bz"] / f"{bz}_annual_totals_export_per_bidding_zone_{year}.csv", "annual_exp_bz", config, bz=bz)
+        io.save(res_imp_type.T.rename_axis("Type"), sub_outs["imp_type"] / f"{bz}_annual_totals_import_per_type_{year}.csv", "annual_imp_type", config, bz=bz)
+        io.save(res_exp_type.T.rename_axis("Type"), sub_outs["exp_type"] / f"{bz}_annual_totals_export_per_type_{year}.csv", "annual_exp_type", config, bz=bz)
         
         res_agg = pd.DataFrame(dtype=float)
         for m in res_imp_type.index:
@@ -669,6 +679,6 @@ def perform_post_processing_aggregation(config: PipelineConfig, io: DataIO) -> N
                 valid = [t for t in techs if t in res_imp_type.columns]
                 res_agg.loc[m, cat] = res_imp_type.loc[m, valid].sum()
         
-        io.save(res_agg.T, sub_outs["imp_agg"] / f"{bz}_annual_totals_import_per_agg_type_{year}.csv", "annual_imp_agg", config, bz=bz)
+        io.save(res_agg.T.rename_axis("Type"), sub_outs["imp_agg"] / f"{bz}_annual_totals_import_per_agg_type_{year}.csv", "annual_imp_agg", config, bz=bz)
 
     logger.info("Post-Processing Complete.")
