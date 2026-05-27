@@ -145,10 +145,10 @@ def main():
             perform_decomposition_analysis(config, io, gen_dfs=gen_data, comm_dfs=final_comm)
         
         if config.analysis_flags["ac_flow_tracing_analysis"]:
-            perform_aggregated_flow_tracing(config, io, gen_dfs=gen_data, phys_flow_dfs=final_phys)
+            perform_aggregated_flow_tracing(config, io, gen_dfs=gen_data, comm_dfs=None, phys_flow_dfs=final_phys, flow_type="physical")
 
         if config.analysis_flags["dc_flow_tracing_analysis"]:
-            perform_direct_flow_tracing(config, io, gen_dfs=gen_data, phys_flow_dfs=final_phys)
+            perform_direct_flow_tracing(config, io, gen_dfs=gen_data, comm_dfs=None, phys_flow_dfs=final_phys, flow_type="physical")
         
         if config.analysis_flags["pooling_analysis"]:
             perform_pooling_analysis(config, io, gen_dfs=gen_data, comm_dfs=final_comm, phys_flow_dfs=final_phys)
