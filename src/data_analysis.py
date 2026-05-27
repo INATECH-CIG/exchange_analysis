@@ -24,12 +24,15 @@ logger = logging.getLogger(__name__)
 # ==========================================
 # LOADER
 # ==========================================
+# ==========================================
+# LOADER
+# ==========================================
 def _load_if_missing(
     config: PipelineConfig, 
     io: DataIO, 
     gen_dfs: Optional[Dict[str, pd.DataFrame]], 
     comm_dfs: Optional[Dict[str, pd.DataFrame]] = None, 
-    phys_dfs: Optional[Dict[str, pd.DataFrame]] = None
+    phys_flow_dfs: Optional[Dict[str, pd.DataFrame]] = None
 ) -> Tuple[Dict[str, pd.DataFrame], Dict[str, pd.DataFrame], Dict[str, pd.DataFrame]]:
     """
     Lazy-loads generation, commercial, and physical datasets into memory.
@@ -67,22 +70,22 @@ def _load_if_missing(
             
     if comm_dfs is None: comm_dfs = {}
 
-    if phys_dfs is None:
+    if phys_flow_dfs is None:
         logger.info("Loading Physical Flow data...")
         flow_dir = config.get_output_path("physical_flow_data_bidding_zones")
-        phys_dfs = {}
+        phys_flow_dfs = {}
         for bz in config.zones:
             df = io.load(flow_dir / f"{bz}_physical_flow_data_bidding_zones.csv", "processed_physical_flows", config, bz=bz)
             if df is not None:
                 if "source_download_date" in df.columns and not hasattr(config, "analysis_source_date"):
                     config.analysis_source_date = str(df["source_download_date"].iloc[0]).split()[0]
-                phys_dfs[bz] = df.resample("1h").mean(numeric_only=True).fillna(0)
+                phys_flow_dfs[bz] = df.resample("1h").mean(numeric_only=True).fillna(0)
     else:
         logger.info("Physical Flow data already loaded...")
 
-    if phys_dfs is None: phys_dfs = {}
+    if phys_flow_dfs is None: phys_flow_dfs = {}
     
-    return gen_dfs, comm_dfs, phys_dfs
+    return gen_dfs, comm_dfs, phys_flow_dfs
 
 # ==========================================
 # PART 1: NEIGHBOR DECOMPOSITION
@@ -258,23 +261,44 @@ def perform_aggregated_flow_tracing(
     config: PipelineConfig, 
     io: DataIO,
     gen_dfs: Optional[Dict[str, pd.DataFrame]] = None, 
-    phys_flow_dfs: Optional[Dict[str, pd.DataFrame]] = None
+    comm_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+    phys_flow_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+    flow_type: str = "physical"
 ) -> None:
     """
     Constructs and inverts the grid topology matrix to perform Aggregated Coupling Flow Tracing.
-    Net positions define the nodal injections.
+    Net positions define the nodal injections. Dynamically processes physical or commercial flows.
     """
-    logger.info("Starting Aggregated Coupling Flow Tracing...")
-    gen_dfs_loaded, _, phys_flow_dfs_loaded = _load_if_missing(config, io, gen_dfs, phys_dfs=phys_flow_dfs)
-    for bz in config.zones:
-        if bz in gen_dfs_loaded: gen_dfs_loaded[bz] = gen_dfs_loaded[bz].resample("1h").mean(numeric_only=True).fillna(0)
-        if bz in phys_flow_dfs_loaded: phys_flow_dfs_loaded[bz] = phys_flow_dfs_loaded[bz].resample("1h").mean(numeric_only=True).fillna(0)
+    logger.info(f"Starting Aggregated Coupling Flow Tracing ({flow_type.upper()})...")
+    
+    # 1. Load everything needed, then route the active dictionary
+    gen_dfs_loaded, comm_dfs_loaded, phys_flow_dfs_loaded = _load_if_missing(
+        config, io, gen_dfs=gen_dfs, comm_dfs=comm_dfs, phys_flow_dfs=phys_flow_dfs
+    )
+    
+    if flow_type == "physical":
+        active_flow_dfs = phys_flow_dfs_loaded
+    elif flow_type == "commercial":
+        active_flow_dfs = comm_dfs_loaded
+    else:
+        raise ValueError(f"Unsupported flow_type: {flow_type}. Must be 'physical' or 'commercial'.")
 
+    for bz in config.zones:
+        if bz in gen_dfs_loaded: 
+            gen_dfs_loaded[bz] = gen_dfs_loaded[bz].resample("1h").mean(numeric_only=True).fillna(0)
+        if bz in active_flow_dfs: 
+            active_flow_dfs[bz] = active_flow_dfs[bz].resample("1h").mean(numeric_only=True).fillna(0)
+
+    # Initialize dataframes for both the final MW tracing AND the structural 'q' coefficients (wide format)
     agg_tracing = {bz: pd.DataFrame(0.0, index=config.time_index, columns=config.zones, dtype=float) for bz in config.zones}
-    agg_dir = config.output_dir / "import_flow_tracing_bidding_zones/agg_coupling" / str(config.year)
+    q_matrices = {bz: pd.DataFrame(0.0, index=config.time_index, columns=config.zones, dtype=float) for bz in config.zones}
+    
+    # 2. Update label and directory to segregate physical and commercial results
+    label = f"{flow_type}_agg_coupling"
+    agg_dir = config.output_dir / f"import_flow_tracing_bidding_zones/{label}" / str(config.year)
     sing_times: List[pd.Timestamp] = []
     
-    logger.info("[Agg. Coupling] Inverting Matrices...")
+    logger.info(f"[{flow_type.title()} Agg. Coupling] Inverting Matrices...")
     for t in tqdm.tqdm(config.time_index):
         Pin: List[List[float]] = []
         A: List[List[float]] = []
@@ -286,12 +310,12 @@ def perform_aggregated_flow_tracing(
             A_arr: List[float] = [0.0] * len(config.zones)
             exports: float = 0.0
             
-            for n in [x for x in config.neighbours_map[bz] if x in config.zones and f"{bz}_{x}_net_export" in phys_flow_dfs_loaded[bz].columns]:
-                val = phys_flow_dfs_loaded[bz].at[t, f"{bz}_{n}_net_export"]
+            for n in [x for x in config.neighbours_map[bz] if x in config.zones and f"{bz}_{x}_net_export" in active_flow_dfs[bz].columns]:
+                val = active_flow_dfs[bz].at[t, f"{bz}_{n}_net_export"]
                 if val < 0: A_arr[config.zones.index(n)] = float(val)
                 else: exports += float(val)
             
-            net_exp = float(phys_flow_dfs_loaded[bz].at[t, "Net Export"])
+            net_exp = float(active_flow_dfs[bz].at[t, "Net Export"])
             if net_exp > 0:
                 Pin_arr[config.zones.index(bz)], A_arr[config.zones.index(bz)] = net_exp, exports
                 net_imps.append(0.0)
@@ -305,11 +329,11 @@ def perform_aggregated_flow_tracing(
         for idx, bz_name in enumerate(config.zones):
             if A[idx][idx] == 0:
                 # Capture state diagnostics prior to applying inversion patch
-                bz_net = phys_flow_dfs_loaded[bz_name].at[t, "Net Export"]
+                bz_net = active_flow_dfs[bz_name].at[t, "Net Export"]
                 borders = {
-                    f"{bz_name}->{n}": phys_flow_dfs_loaded[bz_name].at[t, f"{bz_name}_{n}_net_export"] 
+                    f"{bz_name}->{n}": active_flow_dfs[bz_name].at[t, f"{bz_name}_{n}_net_export"] 
                     for n in config.neighbours_map[bz_name] 
-                    if f"{bz_name}_{n}_net_export" in phys_flow_dfs_loaded[bz_name].columns
+                    if f"{bz_name}_{n}_net_export" in active_flow_dfs[bz_name].columns
                 }
                 
                 logger.warning(
@@ -325,6 +349,9 @@ def perform_aggregated_flow_tracing(
         try:
             q = np.dot(np.linalg.inv(A), Pin)
             for x in range(len(config.zones)):
+                # ---- SAVE THE Q MATRIX ROW ----
+                q_matrices[config.zones[x]].loc[t] = q[x]
+                
                 imps = net_imps[x] * q[x]
                 for i in range(len(imps)):
                     if imps[i] > 0 and x != i: 
@@ -337,6 +364,7 @@ def perform_aggregated_flow_tracing(
             
             for x in config.zones:
                 agg_tracing[x].loc[t] = np.nan
+                q_matrices[x].loc[t] = np.nan
             
     # Persist unresolvable timepoints for subsequent imputation
     log_path = agg_dir / "incalculable_timepoints/incalculable_timepoints.csv"
@@ -346,29 +374,58 @@ def perform_aggregated_flow_tracing(
     elif log_path.exists():
         log_path.unlink()
         
-    _decompose_and_save(config, io, agg_tracing, agg_dir, "agg_coupling", gen_dfs_loaded)
+    # Persist the Wide Q matrices locally and/or DB via io.save
+    logger.info(f"[{flow_type.title()} Agg. Coupling] Saving base wide Q-matrices...")
+    q_dir = agg_dir / "q_matrices"
+    for bz in config.zones:
+        io.save(q_matrices[bz], q_dir / f"{bz}_q_matrix_{label}.csv", f"q_matrix_{label}", config, bz=bz)
+
+    _decompose_and_save(config, io, agg_tracing, agg_dir, label, gen_dfs_loaded)
+
 
 def perform_direct_flow_tracing(
     config: PipelineConfig, 
     io: DataIO,
     gen_dfs: Optional[Dict[str, pd.DataFrame]] = None, 
-    phys_flow_dfs: Optional[Dict[str, pd.DataFrame]] = None
+    comm_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+    phys_flow_dfs: Optional[Dict[str, pd.DataFrame]] = None,
+    flow_type: str = "physical"
 ) -> None:
     """
     Constructs and inverts the grid topology matrix for Direct Coupling Flow Tracing.
     Uses absolute internal generation and demand as the primary nodal properties.
+    Dynamically processes physical or commercial flows.
     """
-    logger.info("Starting Direct Coupling Flow Tracing...")
-    gen_dfs_loaded, _, phys_flow_dfs_loaded = _load_if_missing(config, io, gen_dfs, phys_dfs=phys_flow_dfs)
-    for bz in config.zones:
-        if bz in gen_dfs_loaded: gen_dfs_loaded[bz] = gen_dfs_loaded[bz].resample("1h").mean(numeric_only=True).fillna(0)
-        if bz in phys_flow_dfs_loaded: phys_flow_dfs_loaded[bz] = phys_flow_dfs_loaded[bz].resample("1h").mean(numeric_only=True).fillna(0)
+    logger.info(f"Starting Direct Coupling Flow Tracing ({flow_type.upper()})...")
+    
+    # 1. Dynamically load the correct flow data based on parameter
+    gen_dfs_loaded, comm_dfs_loaded, phys_flow_dfs_loaded = _load_if_missing(
+        config, io, gen_dfs=gen_dfs, comm_dfs=comm_dfs, phys_flow_dfs=phys_flow_dfs
+    )
+    
+    if flow_type == "physical":
+        active_flow_dfs = phys_flow_dfs_loaded
+    elif flow_type == "commercial":
+        active_flow_dfs = comm_dfs_loaded
+    else:
+        raise ValueError(f"Unsupported flow_type: {flow_type}. Must be 'physical' or 'commercial'.")
 
+    for bz in config.zones:
+        if bz in gen_dfs_loaded: 
+            gen_dfs_loaded[bz] = gen_dfs_loaded[bz].resample("1h").mean(numeric_only=True).fillna(0)
+        if bz in active_flow_dfs: 
+            active_flow_dfs[bz] = active_flow_dfs[bz].resample("1h").mean(numeric_only=True).fillna(0)
+
+    # Initialize dataframes for both the final MW tracing AND the structural 'q' coefficients (wide format)
     dir_tracing = {bz: pd.DataFrame(0.0, index=config.time_index, columns=config.zones, dtype=float) for bz in config.zones}
-    direct_dir = config.output_dir / "import_flow_tracing_bidding_zones/direct_coupling" / str(config.year)
+    q_matrices = {bz: pd.DataFrame(0.0, index=config.time_index, columns=config.zones, dtype=float) for bz in config.zones}
+    
+    # 2. Update label and directory to segregate physical and commercial results
+    label = f"{flow_type}_direct_coupling"
+    direct_dir = config.output_dir / f"import_flow_tracing_bidding_zones/{label}" / str(config.year)
     sing_times: List[pd.Timestamp] = []
     
-    logger.info("[Direct Coupling] Inverting Matrices...")
+    logger.info(f"[{flow_type.title()} Direct Coupling] Inverting Matrices...")
     for t in tqdm.tqdm(config.time_index):
         Gin: List[List[float]] = []
         A: List[List[float]] = []
@@ -389,13 +446,13 @@ def perform_direct_flow_tracing(
                 load_val = 0.0
                 logger.warning(f"Warning: Missing generation array for {bz} at {t}")
 
-            net_exp = float(phys_flow_dfs_loaded[bz].at[t, "Net Export"])
+            net_exp = float(active_flow_dfs[bz].at[t, "Net Export"])
             
             alt_gen = load_val + net_exp
             alt_demand = gen_val - net_exp
             
-            for n in [x for x in config.neighbours_map[bz] if x in config.zones and f"{bz}_{x}_net_export" in phys_flow_dfs_loaded[bz].columns]:
-                val = phys_flow_dfs_loaded[bz].at[t, f"{bz}_{n}_net_export"]
+            for n in [x for x in config.neighbours_map[bz] if x in config.zones and f"{bz}_{x}_net_export" in active_flow_dfs[bz].columns]:
+                val = active_flow_dfs[bz].at[t, f"{bz}_{n}_net_export"]
                 if val < 0: A_arr[config.zones.index(n)] = float(val)
                 else: exports += float(val)
             
@@ -416,11 +473,11 @@ def perform_direct_flow_tracing(
         for idx, bz_name in enumerate(config.zones):
             if A[idx][idx] == 0:
                 # Capture state diagnostics prior to applying inversion patch
-                bz_net = phys_flow_dfs_loaded[bz_name].at[t, "Net Export"]
+                bz_net = active_flow_dfs[bz_name].at[t, "Net Export"]
                 borders = {
-                    f"{bz_name}->{n}": phys_flow_dfs_loaded[bz_name].at[t, f"{bz_name}_{n}_net_export"] 
+                    f"{bz_name}->{n}": active_flow_dfs[bz_name].at[t, f"{bz_name}_{n}_net_export"] 
                     for n in config.neighbours_map[bz_name] 
-                    if f"{bz_name}_{n}_net_export" in phys_flow_dfs_loaded[bz_name].columns
+                    if f"{bz_name}_{n}_net_export" in active_flow_dfs[bz_name].columns
                 }
                 
                 logger.warning(
@@ -436,6 +493,9 @@ def perform_direct_flow_tracing(
         try:
             q = np.dot(np.linalg.inv(A), Gin)
             for x in range(len(config.zones)):
+                # ---- SAVE THE Q MATRIX ROW ----
+                q_matrices[config.zones[x]].loc[t] = q[x]
+                
                 imps = demands[x] * q[x]
                 for i in range(len(imps)):
                     if imps[i] > 0 and x != i: 
@@ -448,6 +508,7 @@ def perform_direct_flow_tracing(
             
             for x in config.zones:
                 dir_tracing[x].loc[t] = np.nan
+                q_matrices[x].loc[t] = np.nan
     
     # Persist unresolvable timepoints for subsequent imputation
     log_path = direct_dir / "incalculable_timepoints/incalculable_timepoints.csv"
@@ -457,8 +518,14 @@ def perform_direct_flow_tracing(
     elif log_path.exists():
         log_path.unlink()
         
-    _decompose_and_save(config, io, dir_tracing, direct_dir, "direct_coupling", gen_dfs_loaded)
+    # Persist the Wide Q matrices locally and/or DB via io.save
+    logger.info(f"[{flow_type.title()} Direct Coupling] Saving base wide Q-matrices...")
+    q_dir = direct_dir / "q_matrices"
+    for bz in config.zones:
+        io.save(q_matrices[bz], q_dir / f"{bz}_q_matrix_{label}.csv", f"q_matrix_{label}", config, bz=bz)
 
+    _decompose_and_save(config, io, dir_tracing, direct_dir, label, gen_dfs_loaded)
+    
 # ==========================================
 # PART 3: POOLING
 # ==========================================

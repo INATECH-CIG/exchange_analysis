@@ -522,7 +522,6 @@ def fetch_simple_metrics(client: EntsoePandasClient, config: PipelineConfig, io:
                         df.loc[mask_2025] = df.loc[mask_2025] * -1
                 
                 df = df.apply(pd.to_numeric, errors='coerce')
-                df_resampled = df.resample("1h").mean(numeric_only=True)
                 
                 table_name = f"raw_{name}"
-                io.save(df_resampled, out_dir / f"{bz}_{name}.csv", table_name, config, bz=bz)
+                io.save(df, out_dir / f"{bz}_{name}.csv", table_name, config, bz=bz)
