@@ -34,6 +34,7 @@ from data_analysis import (
     perform_post_processing_aggregation
 )
 
+from statistical_analysis import (
     perform_statistical_analysis
 )
 
