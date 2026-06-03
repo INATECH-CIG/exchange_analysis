@@ -34,6 +34,9 @@ from data_analysis import (
     perform_post_processing_aggregation
 )
 
+    perform_statistical_analysis
+)
+
 def main():
     # ==========================================
     # CONTROL PANEL
@@ -45,6 +48,7 @@ def main():
         "process": True,
         "analysis": True,
         "post_processing": True,
+        "statistical_analysis": True,
     }
 
     analysis_subset = {
@@ -56,6 +60,7 @@ def main():
     
     # 2. Define Period (UTC)
     period = ("2026-01-01 00:00", "2026-01-31 23:59") 
+    period = ("2025-01-01 00:00", "2025-12-31 23:59") 
 
     # 3. Define I/O Settings (Storage & Loading)
     my_io_settings = {
@@ -121,11 +126,38 @@ def main():
     gen_data, final_comm, final_phys = None, None, None
     if config.run_phases["process"]:
         logger.info("\n=== STARTING PROCESSING ===")
+
+        # ========================================================
+        # Prevent metadata contamination 
+        # from old pipeline runs or partial API failures.
+        # ========================================================
+        logger.info("[Cleanup] Purging stale output data and gap audit logs...")
+        
+        # Define the folders your pipeline touches
+        target_folders = [
+            "physical_flow_data_bidding_zones", 
+            "comm_flow_total_bidding_zones",
+            "comm_flow_dayahead_bidding_zones"
+        ]
+        
+        for folder in target_folders:
+            out_dir = config.get_output_path(folder)
+            gaps_dir = config.get_gaps_path(folder)
+            
+            # 1. Purge all CSVs in the output directory
+            if out_dir.exists():
+                for file_path in out_dir.glob("*.csv"):
+                    file_path.unlink()
+                    
+            # 2. Purge all CSVs in the gaps directory
+            if gaps_dir.exists():
+                for file_path in gaps_dir.glob("*.csv"):
+                    file_path.unlink()
         
         # A. Generation & Demand
         gen_data = process_generation_demand(config, io)
         
-        # B. Commercial Flows (Total)
+        # B. Commercial Flow Totals
         raw_comm = process_flows(config, io, "commercial", dayahead=False)
         final_comm = balance_flows_symmetry(raw_comm, config, io, "commercial", dayahead=False)
         
@@ -134,7 +166,7 @@ def main():
         balance_flows_symmetry(raw_da, config, io, "commercial", dayahead=True)
         
         # D. Physical Flows
-        raw_phys = process_flows(config, io, "physical")
+        raw_phys = process_flows(config, io, "physical", fallback_df=final_comm)
         final_phys = balance_flows_symmetry(raw_phys, config, io, "physical")
 
     # --- PHASE 3: ANALYSIS ---
@@ -155,6 +187,9 @@ def main():
     
     if config.run_phases["post_processing"]:
         perform_post_processing_aggregation(config, io)
+
+    if config.run_phases["statistical_analysis"]:
+        perform_statistical_analysis(config, io, target_years=["2021", "2022", "2023", "2024", "2025"])
 
 if __name__ == "__main__":
     main()

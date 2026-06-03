@@ -228,10 +228,17 @@ def download_flows(client: EntsoePandasClient, config: PipelineConfig, io: DataI
             table_name = f"raw_{flow_type}_flows" + ("_da" if dayahead else "")
             io.save(flow_df.loc[~flow_df.index.duplicated()], raw_dir / f"{bz}_raw_flows.csv", table_name, config, bz=bz)
 
-def process_flows(config: PipelineConfig, io: DataIO, flow_type: str = "commercial", dayahead: bool = False) -> Dict[str, pd.DataFrame]:
+def process_flows(
+    config: PipelineConfig, 
+    io: DataIO, 
+    flow_type: str = "commercial", 
+    dayahead: bool = False,
+    fallback_df: Optional[Dict[str, pd.DataFrame]] = None
+) -> Dict[str, pd.DataFrame]:
     """
-    Standardizes bilateral flow matrices, applies gap imputation, and evaluates zero-flow legitimacy.
-    Operates in two phases to guarantee a globally synchronized data vintage.
+    Standardizes bilateral flow matrices, evaluates zero-flow legitimacy, and applies gap imputation.
+    Operates in two passes to diagnose telemetry errors and safely isolate HVDC proxies.
+    Derived net exports are calculated post-imputation to prevent phantom interpolation tags.
     """
     folder = "physical_flow_data_bidding_zones" if flow_type == "physical" else f"comm_flow_{'dayahead' if dayahead else 'total'}_bidding_zones"
     raw_dir, out_dir, gaps_dir = config.get_output_path(folder) / "raw", config.get_output_path(folder), config.get_gaps_path(folder)
@@ -249,7 +256,7 @@ def process_flows(config: PipelineConfig, io: DataIO, flow_type: str = "commerci
         df: Optional[pd.DataFrame] = io.load(flow_path, table_name, config, bz=bz)
         
         if df is not None: 
-            # 1. Primary: Check internal columns for data lineage
+            # Derive internal vintage tags for batch synchronization
             if "download_timestamp" in df.columns:
                 v = str(df["download_timestamp"].iloc[0]).split()[0]
             elif "source_download_date" in df.columns:
@@ -271,33 +278,79 @@ def process_flows(config: PipelineConfig, io: DataIO, flow_type: str = "commerci
         df[data_cols] = df[data_cols].apply(pd.to_numeric, errors='coerce')
         df_resampled = df.resample("1h").mean(numeric_only=True)
 
-        df = fill_gaps_wrapper(df_resampled, gaps_dir, f"{bz}_flows", config=config, io=io, bz=bz, flow_type=flow_type, dayahead=dayahead)
-        
         logger.info(f"[Process] {flow_type} flows for {bz} (Dayahead={dayahead})...")
 
-        # Establish localized net border exports
-        net_df = pd.DataFrame(index=df.index)
+        # Start with just the resampled data; do NOT calculate net_export yet!
+        combined_df = df_resampled
+        
+        # -------------------------------------------------------------
+        # THE TWO-PASS CORRECTION SEQUENCE
+        # -------------------------------------------------------------
+        ref_df = fallback_df.get(bz) if fallback_df is not None else None
+        
+        # PASS 1: The Detector punches NaNs and logs TELEMETRY_DROPOUT for all dead lines
+        combined_df = correct_zero_values(combined_df, gaps_dir, bz, config, flow_type=flow_type, reference_df=ref_df, record_zeros=False)
+        
+        # HVDC PROXY PATCHING: Strictly isolate commercial patching to HVDC borders
+        if ref_df is not None:
+            hvdc_borders = getattr(config, 'hvdc_borders', [])
+            hvdc_cols = []
+            
+            # Dynamically build the list of both directions for any HVDC line
+            for target in config.neighbours_map.get(bz, []):
+                col_out = f"{bz}_{target}"
+                col_in = f"{target}_{bz}"
+                if col_out in hvdc_borders or col_in in hvdc_borders:
+                    if col_out in combined_df.columns and col_out in ref_df.columns: 
+                        hvdc_cols.append(col_out)
+                    if col_in in combined_df.columns and col_in in ref_df.columns: 
+                        hvdc_cols.append(col_in)
+            
+            # ONLY fill the NaNs if they belong to an HVDC column!
+            if hvdc_cols:
+                combined_df[hvdc_cols] = combined_df[hvdc_cols].fillna(ref_df[hvdc_cols])
+            
+        # INTERPOLATION: Attempt standard linear interpolation for remaining missing data
+        combined_df = fill_gaps_wrapper(combined_df, gaps_dir, f"{bz}_flows", config=config, io=io, bz=bz, flow_type=flow_type, dayahead=dayahead)
+        
+        # PASS 2 (Post-Imputation): Audit again (with commercial vision), record zeros, and sanitize NaNs
+        final_df = correct_zero_values(
+            combined_df, 
+            gaps_dir, 
+            bz, 
+            config, 
+            flow_type=flow_type, 
+            reference_df=ref_df,         
+            is_post_imputation=True,     
+            record_zeros=True
+        )
+        
+        # ========================================================
+        # DETERMINISTIC RECALCULATION: 
+        # Calculate derived net exports only after all physical gaps 
+        # and proxies have been perfectly resolved.
+        # ========================================================
         for n in [z for z in config.neighbours_map[bz] if z in config.zones]:
             col_out = f"{bz}_{n}"
             col_in = f"{n}_{bz}"
             
-            if col_out in df.columns or col_in in df.columns:
-                out_series = df[col_out] if col_out in df.columns else 0.0
-                in_series = df[col_in] if col_in in df.columns else 0.0
-                net_df[f"{col_out}_net_export"] = out_series - in_series
-        
-        net_df["Net Export"] = net_df.sum(axis=1)
-        
-        # Handle systemic zero-drops and force net export recalculation
-        final_df = correct_zero_values(pd.concat([df, net_df], axis=1), gaps_dir, bz, config, flow_type=flow_type)
-        
-        # Store in dictionary to await global synchronization
+            if col_out in final_df.columns or col_in in final_df.columns:
+                out_series = final_df[col_out] if col_out in final_df.columns else 0.0
+                in_series = final_df[col_in] if col_in in final_df.columns else 0.0
+                final_df[f"{col_out}_net_export"] = out_series - in_series
+                
+        net_export_cols = [c for c in final_df.columns if c.endswith("_net_export")]
+        if net_export_cols:
+            final_df["Net Export"] = final_df[net_export_cols].sum(axis=1)
+        else:
+            final_df["Net Export"] = 0.0
+        # ========================================================
+
         flow_dict[bz] = final_df
 
     # ========================================================
     # PHASE 2: SYNCHRONIZE VINTAGE AND SAVE
     # ========================================================
-    # Determines the latest temporal vintage across all flow matrices
     if vintages:
         current_batch_latest = max(vintages)
         existing_global = getattr(config, "analysis_source_date", current_batch_latest)
@@ -309,7 +362,6 @@ def process_flows(config: PipelineConfig, io: DataIO, flow_type: str = "commerci
         else:
             logger.info(f"[Metadata] Flow data vintage synchronized to: {config.analysis_source_date}")
 
-    # Commit synchronized dataframes to designated IO channels
     for bz, final_df in flow_dict.items():
         filename = f"{bz}_comm_flow_{'dayahead' if dayahead else 'total'}_bidding_zones.csv" if flow_type == "commercial" else f"{bz}_physical_flow_data_bidding_zones.csv"
         processed_table = f"processed_{flow_type}_flows" + ("_da" if dayahead else "")

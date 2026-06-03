@@ -728,12 +728,6 @@ def perform_post_processing_aggregation(config: PipelineConfig, io: DataIO) -> N
         res_exp_bz = res_exp_bz.apply(pd.to_numeric, errors='coerce').fillna(0.0) / 1e6
         res_imp_type = res_imp_type.apply(pd.to_numeric, errors='coerce').fillna(0.0) / 1e6
         res_exp_type = res_exp_type.apply(pd.to_numeric, errors='coerce').fillna(0.0) / 1e6
-        
-        if bz=="DE_LU":
-            print(f"\nAnnual Totals for {bz} (TWh):")
-            print("Import BZ:", res_imp_bz.T.sum())
-            print("Export BZ:", res_exp_bz.T.sum())
-            print("Net Export BZ:", (res_exp_bz - res_imp_bz).T.sum())
 
         io.save(res_imp_bz.T.rename_axis("Bidding Zone"), sub_outs["imp_bz"] / f"{bz}_annual_totals_import_per_bidding_zone_{year}.csv", "annual_imp_bz", config, bz=bz)
         io.save(res_exp_bz.T.rename_axis("Bidding Zone"), sub_outs["exp_bz"] / f"{bz}_annual_totals_export_per_bidding_zone_{year}.csv", "annual_exp_bz", config, bz=bz)
